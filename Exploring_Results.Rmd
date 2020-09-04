@@ -1,0 +1,638 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+
+Exploration of the results
+
+
+
+```{r}
+library(Mcomp)
+library(xgboost)
+library(mlr)
+library(parallel)
+library(parallelMap)
+library(tidyr)
+library(tseries)
+#library(Metrics)
+library(forecast)
+library(EnvStats) #for geometric mean
+#library(Metrics) # for MASE
+library(ggplot2)
+library(smooth)
+library(xts)
+library(data.table)
+
+```
+
+Loading all the results calculated
+
+```{r}
+load("4-steps.RData")
+load("12-steps.RData")
+load("13-steps.RData")
+load("extra_ml.RData")
+load("12-steps-extra.RData")
+load("4-steps-extra.RData")
+load("extra_ets.RData")
+```
+
+Removing nulls
+
+```{r}
+final_12_is_list <- final_12_is_list[lengths(final_12_is_list) != 0]
+final_12_ps_list <- final_12_ps_list[lengths(final_12_ps_list) != 0]
+final_12_extra <- final_12_extra[lengths(final_12_is_list) != 0]
+final_13_is_list <- final_13_is_list[lengths(final_13_is_list) != 0]
+final_13_ps_list <- final_13_ps_list[lengths(final_13_ps_list) != 0]
+
+final_13_extra_ets<-final_13_extra_ets[-c(16,63)]
+final_13_extra_ml<-final_13_extra_ml[-c(16,63)]
+final_12_extra_ets<- final_12_extra_ets[-56]
+final_12_extra_ml<- final_12_extra_ml[-56]
+final_4_extra_ets<-final_4_extra_ets[-c(26,75,77)]
+final_4_extra_ml<-final_4_extra_ml[-c(26,75,77)]
+
+```
+
+The Results : 
+
+
+```{r}
+x<- final_4_is_list[-c(26,75)]
+cols <- colnames(final_4_is_list[[1]])
+to_divide <- length(x)
+#26 and 75 have a problem
+total_4 <- data.frame(Reduce('+', lapply(x, '[', cols)))/to_divide
+print.data.frame(total_4)
+
+```
+
+```{r}
+x<- final_13_is_list
+cols <- colnames(final_13_is_list[[1]])
+to_divide <- length(final_13_is_list)
+#26 and 75 have a problem
+total_13 <- data.frame(Reduce('+', lapply(x, '[', cols)))/to_divide
+print.data.frame(total_13)
+
+```
+
+```{r}
+x<- final_12_is_list
+cols <- colnames(final_12_is_list[[1]])
+to_divide <- length(final_12_is_list)
+#26 and 75 have a problem
+total_12 <- data.frame(Reduce('+', lapply(x, '[', cols)))/to_divide
+print.data.frame(total_12)
+
+```
+
+Plotting
+
+1. Quarterly : 
+
+```{r, fig.height=5, fig.width=7}
+#Getting the method that produced the best MIS on the simmulation method!
+validated <- total_4[-5,] #Without means
+#par(bg = 'aliceblue')
+plot(c(1:4) , validated$ErrorDirect, type='l', col='red',ylim=c(0.9,1.35) ,pch = 1,
+      xlab="Horizon h" , ylab = "GMRAE Interval Scores",lwd=2)
+lines(c(1:4) , validated$ErrorKDE , col = 'blue ',lwd=2 ,type='o' ,pch=2)
+lines(c(1:4), validated$SimDirect, col = 'yellow',lwd=2 ,type='o',pch=3)
+lines(c(1:4), validated$SimKDE, col = 'purple',lwd=2 ,type='o',pch=4)
+lines(c(1:4), validated$BootDirect, col = 'green',lwd=2 ,type='o',pch=5)
+lines(c(1:4), validated$BootKDE, col = 'black',lwd=2 ,type='o',pch=6)
+lines(c(1:4), validated$XGB_Direct, col = 'brown',lwd=2 ,type='o',pch=7)
+lines(c(1:4), validated$XGB_KDE, col = 'pink',lwd=2 ,type='o',pch=8)
+
+
+legend(0.9,1.24, legend = c("ErrorDirect" ,"ErrorKDE","SimDirect", "SimKDE" , "BootDirect", "BootKDE",
+                            "XGBDirect" , "XGBKDE")
+         ,col=c("red", "blue" , "yellow" , "purple" , "green" , "black" , "brown","pink"),
+       lty=1, cex=0.7 , pch=c(1,2,3,4,5,6,7,8)) 
+
+```
+
+2. Weekly:
+
+
+```{r, fig.height=5, fig.width=7}
+#Getting the method that produced the best MIS on the simmulation method!
+validated <- total_13[-14,] #Without means
+#par(bg = 'aliceblue')
+plot(c(1:13) , validated$ErrorDirect, type='l', col='red',ylim=c(0.8,1.3) ,pch = 1,
+      xlab="Horizon h" , ylab = "GMRAE Interval Scores",lwd=2)
+lines(c(1:13) , validated$ErrorKDE , col = 'blue ',lwd=2 ,type='o' ,pch=2)
+lines(c(1:13), validated$SimDirect, col = 'yellow',lwd=2 ,type='o',pch=3)
+lines(c(1:13), validated$SimKDE, col = 'purple',lwd=2 ,type='o',pch=4)
+lines(c(1:13), validated$BootDirect, col = 'green',lwd=2 ,type='o',pch=5)
+lines(c(1:13), validated$BootKDE, col = 'black',lwd=2 ,type='o',pch=6)
+lines(c(1:13), validated$XGB_Direct, col = 'brown',lwd=2 ,type='o',pch=7)
+lines(c(1:13), validated$XGB_KDE, col = 'pink',lwd=2 ,type='o',pch=8)
+
+
+legend("topleft", legend = c("ErrorDirect" ,"ErrorKDE","SimDirect", "SimKDE" , "BootDirect", "BootKDE",
+                            "XGBDirect" , "XGBKDE")
+         ,col=c("red", "blue" , "yellow" , "purple" , "green" , "black" , "brown","pink"),
+       lty=1, cex=0.7 , pch=c(1,2,3,4,5,6,7,8)) 
+
+```
+
+
+3. Monthly
+
+```{r, fig.height=5, fig.width=7}
+#Getting the method that produced the best MIS on the simmulation method!
+validated <- total_12[-13,] #Without means
+#par(bg = 'aliceblue')
+plot(c(1:12) , validated$ErrorDirect, type='l', col='red',ylim=c(0.8,1.3) ,pch = 1,
+      xlab="Horizon h" , ylab = "GMRAE Interval Scores",lwd=2)
+lines(c(1:12) , validated$ErrorKDE , col = 'blue ',lwd=2 ,type='o' ,pch=2)
+lines(c(1:12), validated$SimDirect, col = 'yellow',lwd=2 ,type='o',pch=3)
+lines(c(1:12), validated$SimKDE, col = 'purple',lwd=2 ,type='o',pch=4)
+lines(c(1:12), validated$BootDirect, col = 'green',lwd=2 ,type='o',pch=5)
+lines(c(1:12), validated$BootKDE, col = 'black',lwd=2 ,type='o',pch=6)
+lines(c(1:12), validated$XGB_Direct, col = 'brown',lwd=2 ,type='o',pch=7)
+lines(c(1:12), validated$XGB_KDE, col = 'pink',lwd=2 ,type='o',pch=8)
+
+
+legend("topleft", legend = c("ErrorDirect" ,"ErrorKDE","SimDirect", "SimKDE" , "BootDirect", "BootKDE",
+                            "XGBDirect" , "XGBKDE")
+         ,col=c("red", "blue" , "yellow" , "purple" , "green" , "black" , "brown","pink"),
+       lty=1, cex=0.7 , pch=c(1,2,3,4,5,6,7,8)) 
+
+
+
+```
+
+
+
+
+
+
+
+
+
+
+EMP_mat,KDE_mat,SimDirectEMP_mat,SimMeanSigma_mat,SimMeanEMP_mat,SimMeanKDE_mat,BootDirectEMP_mat,
+
+BootMeanSigma_mat,BootMeanKDE_mat,Alg_mat,test_mat,point_mat
+```{r}
+
+final_12_extra_ets_final <- list()
+final_12_extra_ets_final_ps <- list()
+#Getting GMRAE
+for (i in 1:length(final_12_extra_ets)){
+  final_12_extra_ets_final[[i]] <- list()
+  #final_12_extra_ets_final_ps[[i]] <- list()
+  for (j in 1:(length(final_12_extra_ets[[i]])-3)){
+    final_12_extra_ets_final[[i]][[j]] <- matrix(NA,dim(final_12_extra_ets[[1]][[1]])[1],dim(final_12_extra_ets[[1]][[1]])[2])
+        final_12_extra_ets_final_ps[[i]] <- matrix(NA,dim(final_12_extra_ets[[1]][[1]])[1],dim(final_12_extra_ets[[1]][[1]])[2])
+    
+    for (z in 1:12){
+      
+      final_12_extra_ets_final[[i]][[j]][,z] <- abs(final_12_extra_ets[[i]][[j]][,z]/final_12_extra_ets[[i]][[10]][,z])
+      #MAPE
+      final_12_extra_ets_final_ps[[i]][,z] <- abs((final_12_extra_ets[[i]][[12]][,z]-final_12_extra_ets[[i]][[11]][,z])/final_12_extra_ets[[i]][[11]][,z])
+    }
+  }
+  
+}
+
+```
+
+
+
+## Exploring the correlation
+
+
+All sets will be combined and the correlation between Intervals and Points Forecasts for each set of monthly, quarterly and weekly series will be explored.
+
+
+Combining all sets
+```{r}
+
+corr_12 <- final_12_extra_ets_final[[1]]
+corr_12_ps <- final_12_extra_ets_final_ps[[1]]
+for (i in 2:length(final_12_extra_ets_final)){
+  corr_12_ps <- rbind(corr_12_ps,final_12_extra_ets_final_ps[[i]])
+  for (j in 1:length(final_12_extra_ets_final[[i]])){
+    corr_12[[j]]<-rbind(corr_12[[j]],final_12_extra_ets_final[[i]][[j]])
+    
+  }
+}
+
+```
+
+For monthly series:
+
+On ETS
+
+```{r}
+#calculate means
+final_12_extra_ets_errors<- list()
+#Getting GMRAE
+for (i in 1:length(final_12_extra_ets)){
+
+  for (j in 1:(length(final_12_extra_ets[[i]])-3)){
+    final_12_extra_ets_errors[[i]] <- matrix(NA,dim(final_12_extra_ets[[1]][[1]])[1],dim(final_12_extra_ets[[1]][[1]])[2])
+    
+    for (z in 1:12){
+      
+      #MAPE
+      final_12_extra_ets_errors[[i]][,z] <- abs(final_12_extra_ets[[i]][[12]][,z]-final_12_extra_ets[[i]][[11]][,z])
+    }
+  }
+  
+}
+all_means <- list()
+all_means_ps <-list()
+for (i in 1:length(final_12_extra_ets)){
+  all_means[[i]]<-list()
+  for (j in 1:length(final_12_extra_ets_final[[i]])){
+    all_means[[i]][[j]] <- colMeans(final_12_extra_ets[[i]][[j]])
+    all_means_ps[[i]] <- colMeans(final_12_extra_ets_errors[[i]])
+  }
+}
+#add to a single df for every method
+corr_12 <- all_means[[1]]
+corr_12_ps <- all_means_ps[[1]]
+for (i in 2:length(all_means)){
+  corr_12_ps <- rbind(corr_12_ps,all_means_ps[[i]])
+  for (j in 1:length(all_means[[i]])){
+    corr_12[[j]]<-rbind(corr_12[[j]],all_means[[i]][[j]])
+    
+  }
+}
+#make single collumn
+corr_12_final <- list()
+correl<-list()
+corr_12_final_ps <- data.frame(point = c(t(corr_12_ps)), stringsAsFactors=FALSE)
+for (i in 1:9){
+  corr_12_final[[i]] <- data.frame(interval = c(t(corr_12[[i]])), stringsAsFactors=FALSE)
+  correl[[i]] <- cbind(corr_12_final[[i]],corr_12_final_ps)
+}
+#combining methods
+all_12_ets <- correl[[1]]
+for (i in 2:length(correl)){
+  all_12_ets <- rbind(all_12_ets,correl[[i]])
+}
+
+```
+
+
+For XGBoost
+
+```{r}
+#calculate means
+#final_12_extra_xgb<- final_12_extra_xgb[-56]
+final_12_extra_xgb_errors<- list()
+#Getting GMRAE
+for (i in 1:length(final_12_extra_xgb)){
+  #print(i)
+  for (j in 1:(length(final_12_extra_xgb[[i]])-3)){
+    final_12_extra_xgb_errors[[i]] <- matrix(NA,dim(final_12_extra_xgb[[1]][[1]])[1],dim(final_12_extra_xgb[[1]][[1]])[2])
+    
+    for (z in 1:12){
+      
+      #MAPE
+      final_12_extra_xgb_errors[[i]][,z] <- abs(final_12_extra_xgb[[i]][[5]][,z]-final_12_extra_xgb[[i]][[4]][,z])
+    }
+  }
+  
+}
+all_means <- list()
+all_means_ps <-list()
+for (i in 1:length(final_12_extra_xgb)){
+  all_means[[i]]<-list()
+  for (j in 1:length(final_12_extra_xgb[[i]])){
+    all_means[[i]][[j]] <- colMeans(final_12_extra_xgb[[i]][[j]])
+    all_means_ps[[i]] <- colMeans(final_12_extra_xgb_errors[[i]])
+  }
+}
+#add to a single df for every method
+corr_12 <- all_means[[1]]
+corr_12_ps <- all_means_ps[[1]]
+for (i in 2:length(all_means)){
+  corr_12_ps <- rbind(corr_12_ps,all_means_ps[[i]])
+  for (j in 1:length(all_means[[i]])){
+    corr_12[[j]]<-rbind(corr_12[[j]],all_means[[i]][[j]])
+    
+  }
+}
+#make single collumn
+corr_12_final <- list()
+correl<-list()
+corr_12_final_ps <- data.frame(point = c(t(corr_12_ps)), stringsAsFactors=FALSE)
+for (i in 1:3){
+  corr_12_final[[i]] <- data.frame(interval = c(t(corr_12[[i]])), stringsAsFactors=FALSE)
+  correl[[i]] <- cbind(corr_12_final[[i]],corr_12_final_ps)
+}
+#combining methods
+all_12_xgb <- correl[[1]]
+for (i in 2:length(correl)){
+  all_12_xgb <- rbind(all_12_xgb,correl[[i]])
+}
+
+```
+
+
+For quartely series:
+
+For the ETS:
+
+```{r}
+#calculate means
+final_4_extra_ets_errors<- list()
+#Getting GMRAE
+for (i in 1:length(final_4_extra_ets)){
+
+  for (j in 1:(length(final_4_extra_ets[[i]])-3)){
+    final_4_extra_ets_errors[[i]] <- matrix(NA,dim(final_4_extra_ets[[1]][[1]])[1],dim(final_4_extra_ets[[1]][[1]])[2])
+    
+    for (z in 1:4){
+      
+      #MAPE
+      final_4_extra_ets_errors[[i]][,z] <- abs(final_4_extra_ets[[i]][[12]][,z]-final_4_extra_ets[[i]][[11]][,z])
+    }
+  }
+  
+}
+all_means <- list()
+all_means_ps <-list()
+for (i in 1:length(final_4_extra_ets)){
+  all_means[[i]]<-list()
+  for (j in 1:length(final_4_extra_ets[[i]])){
+    all_means[[i]][[j]] <- colMeans(final_4_extra_ets[[i]][[j]])
+    all_means_ps[[i]] <- colMeans(final_4_extra_ets_errors[[i]])
+  }
+}
+#add to a single df for every method
+corr_4 <- all_means[[1]]
+corr_4_ps <- all_means_ps[[1]]
+for (i in 2:length(all_means)){
+  corr_4_ps <- rbind(corr_4_ps,all_means_ps[[i]])
+  for (j in 1:length(all_means[[i]])){
+    corr_4[[j]]<-rbind(corr_4[[j]],all_means[[i]][[j]])
+    
+  }
+}
+#make single collumn
+corr_4_final <- list()
+correl<-list()
+corr_4_final_ps <- data.frame(point = c(t(corr_4_ps)), stringsAsFactors=FALSE)
+for (i in 1:9){
+  corr_4_final[[i]] <- data.frame(interval = c(t(corr_4[[i]])), stringsAsFactors=FALSE)
+  correl[[i]] <- cbind(corr_4_final[[i]],corr_4_final_ps)
+}
+#combining methods
+all_4_ets <- correl[[1]]
+for (i in 2:length(correl)){
+  all_4_ets <- rbind(all_4_ets,correl[[i]])
+}
+```
+
+For XGBoost : 
+
+```{r}
+#calculate means
+#final_4_extra_xgb<-final_4_extra_xgb[-77]
+final_4_extra_xgb_errors<- list()
+#Getting GMRAE
+for (i in 1:length(final_4_extra_xgb)){
+  #print(i)
+  for (j in 1:(length(final_4_extra_xgb[[i]])-3)){
+    final_4_extra_xgb_errors[[i]] <- matrix(NA,dim(final_4_extra_xgb[[1]][[1]])[1],dim(final_4_extra_xgb[[1]][[1]])[2])
+    
+    for (z in 1:4){
+      
+      #MAPE
+      final_4_extra_xgb_errors[[i]][,z] <- abs(final_4_extra_xgb[[i]][[5]][,z]-final_4_extra_xgb[[i]][[4]][,z])
+    }
+  }
+  
+}
+all_means <- list()
+all_means_ps <-list()
+for (i in 1:length(final_4_extra_xgb)){
+  all_means[[i]]<-list()
+  for (j in 1:length(final_4_extra_xgb[[i]])){
+    all_means[[i]][[j]] <- colMeans(final_4_extra_xgb[[i]][[j]])
+    all_means_ps[[i]] <- colMeans(final_4_extra_xgb_errors[[i]])
+  }
+}
+#add to a single df for every method
+corr_4 <- all_means[[1]]
+corr_4_ps <- all_means_ps[[1]]
+for (i in 2:length(all_means)){
+  corr_4_ps <- rbind(corr_4_ps,all_means_ps[[i]])
+  for (j in 1:length(all_means[[i]])){
+    corr_4[[j]]<-rbind(corr_4[[j]],all_means[[i]][[j]])
+    
+  }
+}
+#make single collumn
+corr_4_final <- list()
+correl<-list()
+corr_4_final_ps <- data.frame(point = c(t(corr_4_ps)), stringsAsFactors=FALSE)
+for (i in 1:3){
+  corr_4_final[[i]] <- data.frame(interval = c(t(corr_4[[i]])), stringsAsFactors=FALSE)
+  correl[[i]] <- cbind(corr_4_final[[i]],corr_4_final_ps)
+}
+#combining methods
+all_4_xgb <- correl[[1]]
+for (i in 2:length(correl)){
+  all_4_xgb <- rbind(all_4_xgb,correl[[i]])
+}
+
+```
+
+
+Combining ETS and XGBoost scores for every set:
+
+Monthly:
+
+```{r}
+all_12 <- rbind(all_12_ets,all_12_xgb)
+x <- all_12$interval
+y<- all_12$point
+#y <- zv2
+dim(y) <- c(length(y),1)
+#x <- MAM_means
+dim(x) <- c(length(x),1)
+df_plot <-data.frame(x,y)
+ww <- summary(lm(y ~ I(x^1)+ I(x^2) + I(x^3), data = df_plot))
+p_val <- toString(ww$coefficients[2,4])
+rr <- cor.test(x,y,method="spearman")
+yi <- lm(y  ~ I(x^1)+ I(x^2) + I(x^3), data = df_plot)$fitted.values[order(x)]
+xi <- sort(x)
+
+
+plot(x , y, main = "Monthly Interval Scores and Point Errors" ,xlim=c(50,2000) ,ylim = c(5,350), ylab = "Absolute Error", xlab =  "Interval Score" 
+     , pch = 19 , col=rgb(0,0,0, alpha=0.15) ,cex = 0.5)
+lines(xi,yi, col = "red" , lwd = 2)
+
+```
+
+
+Quartely:
+
+```{r}
+all_4 <- rbind(all_4_ets,all_4_xgb)
+all1_4 <- all_4[ which(all_4$point < 3000 &all_4$interval <7000), ]
+x <- all1_4$interval
+y<- all1_4$point
+#y <- zv2
+dim(y) <- c(length(y),1)
+#x <- MAM_means
+dim(x) <- c(length(x),1)
+df_plot <-data.frame(x,y)
+ww <- summary(lm(y ~ I(x^1)+ I(x^2) + I(x^3), data = df_plot))
+p_val <- toString(ww$coefficients[2,4])
+rr <- cor.test(x,y,method="spearman")
+yi <- lm(y  ~ I(x^1)+ I(x^2) + I(x^3), data = df_plot)$fitted.values[order(x)]
+xi <- sort(x)
+
+
+plot(x , y, main = "Quarterly Interval Scores and Point Errors" ,xlim=c(50,2000) ,ylim = c(5,350), ylab = "Absolute Error", xlab =  "Interval Score" 
+     , pch = 19 , col=rgb(0,0,0, alpha=0.25) ,cex = 0.6)
+lines(xi,yi, col = "red" , lwd = 2)
+
+```
+
+Finaly for the Weekly Series : 
+
+
+```{r}
+final_13_extra_ets_errors<- list()
+#Getting GMRAE
+for (i in 1:length(final_13_extra_ets)){
+
+  for (j in 1:(length(final_13_extra_ets[[i]])-3)){
+    final_13_extra_ets_errors[[i]] <- matrix(NA,dim(final_13_extra_ets[[1]][[1]])[1],dim(final_13_extra_ets[[1]][[1]])[2])
+    
+    for (z in 1:13){
+      
+      #MAPE
+      final_13_extra_ets_errors[[i]][,z] <- abs(final_13_extra_ets[[i]][[12]][,z]-final_13_extra_ets[[i]][[11]][,z])
+    }
+  }
+  
+}
+all_means <- list()
+all_means_ps <-list()
+for (i in 1:length(final_13_extra_ets)){
+  all_means[[i]]<-list()
+  for (j in 1:length(final_13_extra_ets[[i]])){
+    all_means[[i]][[j]] <- colMeans(final_13_extra_ets[[i]][[j]])
+    all_means_ps[[i]] <- colMeans(final_13_extra_ets_errors[[i]])
+  }
+}
+#add to a single df for every method
+corr_13 <- all_means[[1]]
+corr_13_ps <- all_means_ps[[1]]
+for (i in 2:length(all_means)){
+  corr_13_ps <- rbind(corr_13_ps,all_means_ps[[i]])
+  for (j in 1:length(all_means[[i]])){
+    corr_13[[j]]<-rbind(corr_13[[j]],all_means[[i]][[j]])
+    
+  }
+}
+#make single collumn
+corr_13_final <- list()
+correl<-list()
+corr_13_final_ps <- data.frame(point = c(t(corr_13_ps)), stringsAsFactors=FALSE)
+for (i in 1:9){
+  corr_13_final[[i]] <- data.frame(interval = c(t(corr_13[[i]])), stringsAsFactors=FALSE)
+  correl[[i]] <- cbind(corr_13_final[[i]],corr_13_final_ps)
+}
+#combining methods
+all_13_ets <- correl[[1]]
+for (i in 2:length(correl)){
+  all_13_ets <- rbind(all_13_ets,correl[[i]])
+}
+final_13_extra_xgb_errors<- list()
+#Getting GMRAE
+final_13_extra_xgb <- final_13_extra_xgb[lengths(final_13_extra_xgb) != 0]
+for (i in 1:length(final_13_extra_xgb)){
+  #print(i)
+  for (j in 1:(length(final_13_extra_xgb[[i]])-3)){
+    final_13_extra_xgb_errors[[i]] <- matrix(NA,dim(final_13_extra_xgb[[1]][[1]])[1],dim(final_13_extra_xgb[[1]][[1]])[2])
+    
+    for (z in 1:4){
+      
+      #MAPE
+      final_13_extra_xgb_errors[[i]][,z] <- abs(final_13_extra_xgb[[i]][[5]][,z]-final_13_extra_xgb[[i]][[4]][,z])
+    }
+  }
+  
+}
+all_means <- list()
+all_means_ps <-list()
+for (i in 1:length(final_13_extra_xgb)){
+  all_means[[i]]<-list()
+  for (j in 1:length(final_13_extra_xgb[[i]])){
+    all_means[[i]][[j]] <- colMeans(final_13_extra_xgb[[i]][[j]])
+    all_means_ps[[i]] <- colMeans(final_13_extra_xgb_errors[[i]])
+  }
+}
+#add to a single df for every method
+corr_13 <- all_means[[1]]
+corr_13_ps <- all_means_ps[[1]]
+for (i in 2:length(all_means)){
+  corr_13_ps <- rbind(corr_13_ps,all_means_ps[[i]])
+  for (j in 1:length(all_means[[i]])){
+    corr_13[[j]]<-rbind(corr_13[[j]],all_means[[i]][[j]])
+    
+  }
+}
+#make single collumn
+corr_13_final <- list()
+correl<-list()
+corr_13_final_ps <- data.frame(point = c(t(corr_13_ps)), stringsAsFactors=FALSE)
+for (i in 1:3){
+  corr_13_final[[i]] <- data.frame(interval = c(t(corr_13[[i]])), stringsAsFactors=FALSE)
+  correl[[i]] <- cbind(corr_13_final[[i]],corr_13_final_ps)
+}
+#combining methods
+all_13_xgb <- correl[[1]]
+for (i in 2:length(correl)){
+  all_13_xgb <- rbind(all_13_xgb,correl[[i]])
+}
+
+
+```
+
+```{r}
+all_13 <- rbind(all_13_ets,all_13_xgb)
+all1_13 <- all_13[ which(all_13$point < 3000 &all_13$interval <7000), ]
+x <- all1_13$interval
+y<- all1_13$point
+#y <- zv2
+dim(y) <- c(length(y),1)
+#x <- MAM_means
+dim(x) <- c(length(x),1)
+df_plot <-data.frame(x,y)
+ww <- summary(lm(y ~ I(x^1)+ I(x^2) + I(x^3), data = df_plot))
+p_val <- toString(ww$coefficients[2,4])
+rr <- cor.test(x,y,method="spearman")
+yi <- lm(y  ~ I(x^1)+ I(x^2) + I(x^3), data = df_plot)$fitted.values[order(x)]
+xi <- sort(x)
+
+
+plot(x , y, main = "Quarterly Interval Scores and Point Errors" ,xlim=c(50,2000) ,ylim = c(5,350), ylab = "Absolute Error", xlab =  "Interval Score" 
+     , pch = 19 , col=rgb(0,0,0, alpha=0.25) ,cex = 0.6)
+lines(xi,yi, col = "red" , lwd = 2)
+
+```
+

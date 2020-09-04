@@ -1,0 +1,1300 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F, error = F)
+``` 
+
+## Introduction
+
+In this work, methods for Statistical Models will be defined and will be tested on the single AirPassengers Time Series.
+
+Later on the next notebooks, methods will be applied on the whole sets of time-series
+
+```{r error=FALSE}
+library(forecast)
+library(EnvStats) #for geometric mean
+library(Metrics) # for MASE
+library(ggplot2)
+library(smooth)
+```
+
+#### Dataset Used : 
+
+The AirPassengers dataset provided by R will initialy be used. A pretty simple dataset with some hidden irregularities, which are more than enough for the selected methods to be initialy compared. 
+
+Loading:
+
+```{r}
+df <- AirPassengers
+par(bg = 'aliceblue')
+plot(df , main = 'Selected Dataset' , ylab = 'Value' )
+print(df)
+
+
+```
+
+
+Defying the evaluation function: Interval Score
+
+**Note:** Cross Validation(Or rolling origins with re-estimation) will also be used.
+
+```{r}
+#the ID function for IS bellow
+Id <- function(a , b){
+  if (a > b) 1
+  else 0
+}
+#Interval Score for a single Interval
+IS <- function (true, upper , lower , a){ #Interval Score
+  (upper - lower ) + 2/a *(lower - true)*Id(lower,true) + 2/a*(true - upper)*Id(true,upper)
+}
+#Mean Interval Score
+ISs <- function(true,upper,lower,a){ 
+  ISs <- rep(0,length(true))
+  for (i in 1:length(ISs)){
+    
+    ISs[i] <- IS(true[i],upper[i],lower[i],a)
+  }
+  ISs #returns Interval Scores
+}
+```
+
+1st Method: Algebric 
+
+
+```{r}
+#Algebric cross validation :
+cross_val_algebric <- function(model , h ){
+  #Initializing
+  train <- window(AirPassengers , end = 1958.99)
+  test <- window(AirPassengers , start = 1959)
+  n <- length(test) - h + 1
+  
+  lower <- rep(NA , 12)
+  upper <- rep(NA , 12)
+  #Every row is the IS of a 12-steps-ahead forecast
+  IS_mat <- matrix(NA , nrow = n , ncol = h)
+  fit <- ets(train , model = model)
+  for(i in 1:n){
+  #Adjusting the training set to include a new observation each time!
+    #New training set:
+    x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+    #New test set:
+    test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+    #Refitting:
+    refit <- ets(x , model = model)
+    #New forecast:
+    new_forecast <- forecast(refit , h = h)
+    #New intervals:
+    lower <- new_forecast$lower[,2]
+    upper <- new_forecast$upper[,2]
+    IS_mat[i , ] <- ISs(test , upper , lower , 0.05)
+    #Every row is a forecast for h = 12 
+    #In total I have 13 forecasts to evaluate
+  }
+  #The mean of every collumn is the mean IS for every every horizon h
+  Mean_IS <- colMeans(IS_mat)
+return(Mean_IS)
+}
+#Defining train and test set to show results on a single origin
+train_set <-ts(df,frequency=12,start=c(1949,1),end=c(1959,12))
+test_set <-as.double(ts(tail(df,12),frequency=12,start=c(1960,1),end=c(1960,12)))
+#Fitting the models
+
+#AAA <- ets(train_set, model = 'AAA' )
+#MAA <- ets(train_set , model = 'MAA')
+MAM <- ets(train_set , model = 'MAM')
+#Getting point forecasts for the last origin
+
+#algebricAAA <- forecast(AAA , 12)
+#algebricMAA <- forecast(MAA , 12)
+algebricMAM <- forecast(MAM , 12)
+```
+
+
+**Results of the CV Algebric Method:**
+
+```{r}
+#Getting cross validation results
+h <- seq(1,12)
+alg_res <- data.frame(h)
+#Cross validated results
+alg_res['MAM_cv'] <-cross_val_algebric('MAM' , 12)
+print.data.frame(alg_res)
+
+#alg_res['MAA_cv'] <-cross_val_algebric('MAA' , 12)
+#alg_res['AAA_cv'] <-cross_val_algebric('AAA' , 12)
+```
+
+
+
+And the forecasted intervals for the whole last year :
+
+```{r}
+#Getting the intervals
+
+#upperAAA <- algebricAAA$upper[,2]
+#lowerAAA <- algebricAAA$lower[,2]
+
+#upperMAA <- algebricMAA$upper[,2]
+#lowerMAA <- algebricMAA$lower[,2]
+
+upperMAM <- algebricMAM$upper[,2]
+lowerMAM <- algebricMAM$lower[,2]
+
+```
+
+Plotting the Interval Produced:
+
+```{r}
+up <- upperMAM
+low <- lowerMAM
+par(bg = 'aliceblue')
+plot(c(1:12),test_set , type='l' , lwd = 3 , col='red' , xlab='Horizon' , ylab ='Value' ,ylim=c(300,700) ,
+     main = "Theoreticaly Forecasted Interval of MAM model", sub='Figure 1.4',cex.sub=0.7 , font.main=3 , col.sub='red3')
+lines(c(1:12),up,lwd=2)
+lines(c(1:12),low,lwd=2)
+lines(c(1:12) , algebricMAM$mean , lwd = 3 ,col = 'blue')
+polygon(c(c(1:12), rev(c(1:12))),c(up, rev(low)), 
+        density = c(20, 30),
+     col = 'yellow3', border = NA)
+
+legend(0.7,650,legend = c("True","Predicted") , col = c("red" , "blue "),lty=1 )
+```
+
+2nd Method:
+
+Second family of methods is the simulation-based methods:
+
+A demonstration of 30 simulated 12-steps-ahead paths.
+
+```{r}
+simmulations <- (matrix(0, 12 , 30))
+for (i in 1:30){
+  simmulations[,i] <- as.double(simulate(AAA , 12 ))
+}
+
+
+train_set1 <- as.vector(train_set)
+#par(bg = 'aliceblue')
+plot(train_set1, xlim = c(1,144) , ylim = c(100, 600), type = 'l',ylab='',xlab='' , lwd = 2 )
+for (i in 1:30){
+   lines(133:144, simmulations[,i] ,col = "indianred1" ,lwd = 0.1 )}
+#abline(v = 144 , col="red", lwd = 3, lty = 1 , )
+title(main = "30 simulated paths")
+legend("topleft", legend = c("Training Set", "Simmulations") ,lty = 1, col = c("black","indianred1"), cex=0.8) 
+
+```
+
+Thirty simulated 12-steps-ahead paths. 
+
+The same procedure will be repeated for a total of 10.000 paths.
+
+After the procedure has been repeated for every model, different methods will be used, for the desired interval to be calculated.
+
+The distribution of the simmulations for the last month of the test set 
+
+```{r, fig.height=6, fig.width=8}
+
+#simmulationsAAA <- (matrix(0, 12 ,10000))
+#for (i in 1:10000){
+#  simmulationsAAA[,i] <- simulate(AAA , 12 )
+#}
+
+#simmulationsMAA <- (matrix(0, 12 ,10000))
+
+#for (i in 1:10000){
+#  simmulationsMAA[,i] <- simulate(MAA , 12 )
+#}
+
+simmulationsMAM <- (matrix(0, 12 , 10000))
+for (i in 1:10000){
+  simmulationsMAM[,i] <- simulate(MAM , 12 )
+}
+
+#Same lims to c ompare both x and y 
+par(bg = 'aliceblue')
+#hist(simmulationsAAA[12,] ,breaks=50, col='red' ,xlab ='Observation' , xlim=c(250,600),main='AAA' )
+#hist(simmulationsMAA[12,] ,breaks=50, col='red' ,xlab ='Observation' , xlim=c(150,650),main='MAA' )
+hist(simmulationsMAM[12,] ,breaks=50, col='red' ,xlab ='Observation' , xlim=c(250,600),main='MAM' )
+```
+
+In order to get the 95% prediction intervals from the predicted distributions, different approaches could be made so a more accurate estimation could be performed.
+
+The following approaches will be considered as defined on the readme file
+
+
+(1) Direct Empirical
+
+(2) Mean - sigma
+
+(3) Mean - empirical
+
+(4) Mean - KDE :
+
+The results of the different methods on the distributions above : 
+
+```{r}
+#Functions for a single horizon h
+
+
+#Direct quantile for the given level and data
+direct_quant <- function(data , level){
+  prob <- c(1-level , level)
+  quant <- quantile(data , prob)
+  lower <- as.double(quant[1])
+  upper <- as.double(quant[2])
+  return(list(lower,upper))
+}
+#direct_quant(simmulationsAAA[12,],0.05)[1]
+
+#Second method -> mean and sigma
+mean_sigma <- function(data , level, mu_forecast=mean(data) ){
+  
+  #mu_prediction <- mean(data)
+  z <- qnorm(c((1-0.95)/2,(1+0.95)/2))
+  #errors <- data - mu_forecast
+  sigma <- sqrt(mse(mu_forecast,data))
+  quant <- mu_forecast + sigma * z
+  lower <- as.double(quant[1])
+  upper <- as.double(quant[2])
+  return(list(lower,upper)) }
+#mean_sigma(simmulationsAAA[12,],0.95)  
+
+#Third method -> mean empirical
+mean_empirical <- function(data , level, mu_forecast=mean(data) ){
+  probs <- c(1-level,level)
+  errors <- data - mu_forecast
+  error_quant <- quantile(errors, prob =probs )
+  quant <- mu_forecast + error_quant
+  lower <- quant[1]
+  upper <- quant[2]
+  return(list(lower,upper)) }
+
+#Forth method -> KDE
+mean_kde <- function(data , level , mu_forecast = mean(data)){
+  #using Silvermans bandwidth and epanechnikov kernel
+  errors <- data - mu_forecast
+  kde <- density(errors , bw = 'nrd0' , kernel ="epanechnikov")
+  kcde <- cumsum(kde$y)/max(cumsum(kde$y))
+  q <- (1-level)/2 + c(0,1)*level
+  quant <-rep(0,2)
+  for (j in 1:2){
+      idx <- order(abs(kcde-q[j]))[1:2]
+      quant[j] <- approx(kcde[idx],kde$x[idx],xout=q[j])$y
+    
+  }
+  lower <- mu_forecast + quant[1]
+  upper <- mu_forecast + quant[2]
+
+  return(list(lower,upper)) }
+```
+
+```{r}
+
+#method1AAA <- direct_quant(simmulationsAAA[12,] , 0.95)
+#method2AAA <- mean_kde(simmulationsAAA[12,] , 0.95)
+
+#method1MAA <- direct_quant(simmulationsMAA[12,] , 0.95)
+#method2MAA <- mean_kde(simmulationsMAA[12,] , 0.95)
+
+method1MAM <- direct_quant(simmulationsMAM[12,] , 0.95)
+method2MAM <- mean_kde(simmulationsMAM[12,] , 0.95)
+method3MAM <- mean_sigma(simmulationsMAM[12,] , 0.95)
+```
+
+The different Intervals extracted by the different methods (for h = 12) 
+
+```{r, fig.height=4, fig.width=10}
+par(mfrow=c(1,3),bg = 'aliceblue')
+hist(simmulationsMAM[12,] ,breaks=50, col='red' ,xlab ='Observation' , xlim=c(250,600) 
+     , main='MAM with Direct-Empirical' ,freq = FALSE)
+abline(v=method1MAM[1], col="green", lwd=3, lty=2 )
+abline(v=method1MAM[2], col="green", lwd=3, lty=2)
+
+hist(simmulationsMAM[12,] ,breaks=50, col='red' ,xlab ='Observation' , xlim=c(200,600) 
+     , main='MAM with Mean-KDE' ,sub='Figure 2.1',cex.sub=1.5 ,col.sub='red3',freq = FALSE )
+abline(v=method2MAM[1], col="green", lwd=3, lty=2 )
+abline(v=method2MAM[2], col="green", lwd=3, lty=2)
+dens <- density(simmulationsMAM[12,], bw = 'nrd0' , kernel ="epanechnikov")
+lines(dens,col = 'blue' ,lwd=3 )
+
+hist(simmulationsMAM[12,] ,breaks=50, col='red' ,xlab ='Observation' , xlim=c(250,600) 
+     , main='MAM with Mean-Sigma',freq = FALSE )
+abline(v=method3MAM[1], col="green", lwd=3, lty=2 )
+abline(v=method3MAM[2], col="green", lwd=3, lty=2)
+
+```
+
+Defining the functions for the simulation methods (for a whole 12-steps-ahead forecast)
+
+```{r}
+
+
+full_direct_quant <- function(data , level){
+  upper <- seq(0,12)
+  lower <- seq(0,12)
+  prob <- c(1-level , level)
+  for (i in 1:12){
+    quant <- quantile(data[i,] , prob)
+    lower[i] <- as.double(quant[1])
+    upper[i] <- as.double(quant[2])
+  }
+  return(list(lower[1:12],upper[1:12]))
+}
+#Second method -> mean and sigma
+full_mean_sigma <- function(data , level) {
+  upper <- seq(0,12)
+  lower <- seq(0,12)
+  z <- qnorm(c((1-0.95)/2,(1+0.95)/2))
+  for (i in 1:12){
+    mu_forecast <- mean(data[i,])
+    #errors <- data - mu_forecast
+    sigma <- sqrt(mse(mu_forecast,data[i,]))
+    quant <- mu_forecast + sigma * z
+    lower[i] <- as.double(quant[1])
+    upper[i] <- as.double(quant[2])
+  }
+  return(list(lower[1:12],upper[1:12])) }
+#mean_sigma(simmulationsAAA[12,],0.95)  
+
+#Third method -> mean empirical
+full_mean_empirical <- function(data , level ){
+  
+  lower <- seq(0,12)
+  upper <- seq(0,12)
+  probs <- c(1-level,level)
+  for (i in 1:12){
+    mu_forecast = mean(data[i,])
+    errors <- data[i,] - mu_forecast
+    error_quant <- quantile(errors, prob =probs )
+    quant <- mu_forecast + error_quant
+    lower[i] <- quant[1]
+    upper[i] <- quant[2]
+  }
+  return(list(lower[1:12],upper[1:12])) }
+
+#Forth method -> KDE
+full_mean_kde <- function(data , level ){
+  #using Silvermans bandwidth and epanechnikov kernel
+  upper <- seq(0,12)
+  lower <- seq(0,12)
+  q <- (1-level)/2 + c(0,1)*level
+  for (i in 1:12){
+    mu_forecast <- mean(data[i,])
+    errors <- data[i,] - mu_forecast
+    kde <- density(errors , bw = 'nrd0' , kernel ="epanechnikov")
+    kcde <- cumsum(kde$y)/max(cumsum(kde$y))
+    q <- (1-level)/2 + c(0,1)*level
+    quant <-rep(0,2)
+    
+    for (j in 1:2){
+        idx <- order(abs(kcde-q[j]))[1:2]
+        quant[j] <- approx(kcde[idx],kde$x[idx],xout=q[j])$y
+    
+  }
+    lower[i] <- mu_forecast + quant[1]
+    upper[i] <- mu_forecast + quant[2]
+}
+  return(list(lower[1:12],upper[1:12])) }
+
+#Function that return IS scores for 12-steps-ahead for each one of the 4 methods
+#Will be used 13 times!
+single_row_results <- function(fitted_model ,test_set , h ,to_bootstrap=FALSE ){
+  #Initializing
+  direct_quant <- rep(NA , 12)
+  Mean_Sigma <- rep(NA , 12 )
+  Mean_Emp <- rep(NA , 12 )
+  Mean_KDE <- rep(NA , 12)
+  flag <- TRUE
+  while (flag == TRUE){
+    flag <- FALSE
+    simmulations <- (matrix(0, 12 ,10000))
+    for (i in 1:10000){
+      #Simmulating for the given fitted model and the given h
+      simmulations[,i] <- simulate(fitted_model, h ,bootstrap = to_bootstrap)
+    }
+    #Getting the results
+    method1 <- full_direct_quant(simmulations , 0.95)
+    method2 <- full_mean_sigma(simmulations , 0.95)
+    method3 <- full_mean_empirical(simmulations , 0.95)
+    method4 <- full_mean_kde(simmulations , 0.95)
+    for (i in 1:2){
+      if (sum(is.na(method4[[i]]))!=0  ||
+          sum(is.na(method3[[i]]))!=0 ||
+          sum(is.na(method2[[i]]))!=0 ||
+          sum(is.na(method1[[i]]))!=0 ){
+        flag <- TRUE
+   
+      } }
+  }
+  #Setting the return values
+    direct_quant <- c(ISs(test_set,method1[[2]],method1[[1]],0.05))
+    Mean_Sigma <- ISs(test_set,method2[[2]],method2[[1]],0.05)
+    Mean_Emp <- ISs(test_set,method3[[2]],method3[[1]],0.05)
+    Mean_KDE <- ISs(test_set,method4[[2]],method4[[1]],0.05)
+    
+    #return the results
+    return(list(direct_quant,Mean_Sigma,Mean_Emp,Mean_KDE))
+    }
+
+cross_val_simmulation <- function(model , h , to_bootstrap){
+  #A dataframe for all scores
+  to_return <- data.frame(h = c(1:12))
+  #Initializing
+  train <- window(AirPassengers , end = 1958.99)
+  test <- window(AirPassengers , start = 1959)
+  n <- length(test) - h + 1
+  lower <- rep(NA , 12)
+  upper <- rep(NA , 12)
+  #A matrix for each on of the methods
+  DirectEMP_mat <- matrix(NA , nrow = n , ncol = h)
+  MeanSigma_mat <- matrix(NA , nrow = n , ncol = h)
+  MeanEMP_mat <- matrix(NA , nrow = n , ncol = h)
+  MeanKDE_mat <- matrix(NA , nrow = n , ncol = h)
+  fit <- ets(train , model = model)
+  for(i in 1:n){
+    #Initializing cross validation 
+    x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+    test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+    refit <- ets(x , model = model)
+    #Simmulating for the fitted model
+    sim_results <- single_row_results(refit , test , h , to_bootstrap)
+    DirectEMP_mat[i,] <- sim_results[[1]]
+    MeanSigma_mat[i,] <- sim_results[[2]]
+    MeanEMP_mat[i,] <- sim_results[[3]]
+    MeanKDE_mat[i,] <- sim_results[[4]]
+  }
+  to_return['Direct EMP'] <- colMeans(DirectEMP_mat)
+  to_return['Mean Sigma'] <- colMeans(MeanSigma_mat)
+  to_return['Mean EMP'] <- colMeans(MeanEMP_mat)
+  to_return['Mean KDE'] <- colMeans(MeanKDE_mat)
+  return(to_return) }
+
+```
+
+
+Applying
+
+```{r}
+#AAAsim_res <- cross_val_simmulation('AAA' , 12 , FALSE)
+#MAAsim_res <- cross_val_simmulation('MAA' , 12 , FALSE)
+MAMsim_res <- cross_val_simmulation('MAM' , 12 , FALSE)
+```
+
+Plotting Results:
+
+```{r, fig.height=5, fig.width=8}
+no_mean_df <- MAMsim_res[1:12,]
+no_mean_df['Algebric'] <- alg_res$MAM_cv[1:12]
+par(bg = 'aliceblue')
+plot(no_mean_df$h , no_mean_df$`Direct EMP`, type='l', col='red' , ylim=c(40,250) ,pch = 0,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=3)
+lines(no_mean_df$h , no_mean_df$`Mean Sigma` , col = 'blue ' ,lwd=2 ,type='o' ,pch=1)
+lines(no_mean_df$h , no_mean_df$`Mean EMP` , col = 'yellow ',lwd=2 ,type='o' ,pch=2)
+lines(no_mean_df$h , no_mean_df$`Mean KDE` , col = 'purple ' ,lwd=2 ,type='o',pch=3)
+lines(no_mean_df$h , no_mean_df$`Algebric` , col = 'green',lwd=2 ,type='o',pch=4)
+title(main = "MAM simmulation Interval Scores" , sub='Figure 2.5',cex.sub=0.9 , font.main=3 , col.sub='red3')
+
+legend(0.7 , 250 , legend = c("Direct Quant" , "Mean + Sigma" ,"Mean Empirical","Mean KDE"  ,"Algebric forecast")
+         ,col=c("red", "blue" , "yellow" ,"purple" ,"green"),lty=1, cex=0.8 , pch=c(0,1,2,4)) 
+
+
+print(no_mean_df)
+```
+
+
+3rd Method: 
+
+The third family of methods is bootstrap based methods:
+
+The same methods for extracting the PIs from the distributions of simulations, defined on the simulation-based methods, will be used here as well!
+
+**The results for the different models : **
+
+
+```{r}
+#AAAboot_res <- cross_val_simmulation('AAA' , 12 , TRUE)
+#MAAboot_res <- cross_val_simmulation('MAA' , 12 , TRUE)
+MAMboot_res <- cross_val_simmulation('MAM' , 12 , TRUE)
+
+```
+
+Plotting:
+
+```{r, fig.height=6, fig.width=8}
+no_mean_df <- MAMboot_res[1:12,]
+no_mean_df['Algebric'] <- alg_res$MAM_cv[1:12]
+no_mean_df['Sim Mean-KDE'] <- MAMsim_res$`Mean KDE`
+par(bg = 'aliceblue')
+plot(no_mean_df$h , no_mean_df$`Direct EMP`, type='l', col='red' , ylim=c(40,250) ,pch = 0,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=3)
+lines(no_mean_df$h , no_mean_df$`Mean Sigma` , col = 'blue ' ,lwd=2 ,type='o' ,pch=1)
+lines(no_mean_df$h , no_mean_df$`Mean EMP` , col = 'yellow ',lwd=2 ,type='o' ,pch=2)
+lines(no_mean_df$h , no_mean_df$`Mean KDE` , col = 'purple ' ,lwd=2 ,type='o',pch=3)
+lines(no_mean_df$h , no_mean_df$`Algebric` , col = 'green',lwd=2 ,type='o',pch=4)
+lines(no_mean_df$h , no_mean_df$`Sim Mean-KDE` , col = 'black',lwd=2 ,type='o',pch=5)
+title(main = "MAM bootstrap Interval Scores" , sub='Figure 3.3',cex.sub=0.9 , font.main=3 , col.sub='red3')
+
+legend("bottomright" ,legend = c("Direct Quant" , "Mean + Sigma" ,"Mean Empirical","Mean KDE"  ,"Algebric forecast","Simmulation Mean-KDE")
+         ,col=c("red", "blue" , "yellow" ,"purple" ,"green","black"),lty=1, cex=0.8 , pch=c(0,1,2,4,5)) 
+
+
+print(no_mean_df)
+```
+
+
+
+
+4th Method
+
+The fourth family of Methods are the Empirical Methods
+
+The two approaches which will be used here are :
+
+(1)Direct Empirical
+
+(2)Kernel density estimator
+
+```{r}
+#Creating the functions that will produce the intervals!
+direct_quant <- function(model , a ){
+  a <- (1-0.95)/2 + c(0,1)*0.95
+  #Getting the errors:
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  #initializing
+  low <- rep(0,12)
+  up <- rep(0,12)
+  lower <- rep(0,12)
+  upper <- rep(0,12)
+  #Calculating for each h
+  for (h in 1:12){
+    low[h] <- as.double( quantile( er[,h],a))[1] 
+    up[h] <- as.double( quantile( er[,h],a))[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:12],upper[1:12]))
+}
+
+
+kde_quant <- function(model , a ){
+  a <- (1-a)/2 + c(0,1)*a 
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  low <- rep(0,12)
+  up <- rep(0,12)
+  for (h in 1:12){
+    density <- density.default(er[,h],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity)
+    
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y 
+    }
+      if (is.na(x[i])){
+        idx <- order(abs(kcde-a[i]))[2:3] 
+        x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y         
+      }
+    low[h] <- x[1]
+    up[h] <- x[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:12],upper[1:12]))  
+  }
+#Reference: trnnick , (2017),TStools -> intervals-empirir , GitHub repository https://github.com/trnnick/TStools/blob/master/R/intervals-empir.
+
+
+#Not sure if this is correct
+mu_sigma <- function(model , level){
+  a <- qnorm(c((1-level)/2,(1+level)/2))
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  low <- rep(0,12)
+  up <- rep(0,12)
+  lower <- rep(0,12)
+  upper<-rep(0,12)
+  sigma <- rep(0,12)
+  for (h in 1:12){
+    sigma[h] <- sd(er[,h])
+    low <- sigma[h]*a[1]
+    up <- sigma[h]*a[2]
+    
+  }
+  mu_forecast <- forecast(model , 12)
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:12],upper[1:12]))
+
+  
+}
+
+#For multiplicative models.
+#Not sure if this is correct
+mu_direct_quant <- function(model , a ){
+  a <- (1-0.95)/2 + c(0,1)*0.95
+  #Getting the errors:
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  #initializing
+  low <- rep(0,12)
+  up <- rep(0,12)
+  lower <- rep(0,12)
+  upper <- rep(0,12)
+  #Calculating for each h
+  for (h in 1:12){
+    low[h] <- as.double( quantile( er[,h],a))[1] 
+    up[h] <- as.double( quantile( er[,h],a))[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low * mu_forecast$mean
+  upper <- mu_forecast$mean + up * mu_forecast$mean
+  return(list(lower[1:12],upper[1:12]))
+}
+
+mu_kde_quant <- function(model , a ){
+  a <- (1-a)/2 + c(0,1)*a 
+  errors <- model$errors
+  er <- errors[-(1:12),] 
+  low <- rep(0,12)
+  up <- rep(0,12)
+  for (h in 1:12){
+    density <- density.default(er[,h],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity)
+    
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y 
+      if (is.na(x[i])){
+        idx <- order(abs(kcde-a[i]))[2:3] 
+        x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y         
+      }
+    }
+    low[h] <- x[1]
+    up[h] <- x[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low * mu_forecast$mean
+  upper <- mu_forecast$mean + up * mu_forecast$mean
+  return(list(lower[1:12],upper[1:12]))  
+  }
+
+
+
+
+#Function for the cross-validated results:
+
+
+cross_val_empirical <- function(model , h ,multi_error=TRUE){
+    to_return <- data.frame(h = c(1:12))
+    #Initializing
+    train <- window(AirPassengers , end = 1958.99)
+    test <- window(AirPassengers , start = 1959)
+    n <- length(test) - h + 1
+    lower <- rep(NA , 12)
+    upper <- rep(NA , 12)
+    #A matrix for each on of the methods
+    MSE_means <- rep(NA,n)
+    MSE_mat <- matrix(NA , nrow = n , ncol = h)
+    EMP_mat <- matrix(NA , nrow = n , ncol = h)
+    KDE_mat <- matrix(NA , nrow = n , ncol = h)
+    fit <- ets(train , model = model)
+    #Converting to es
+    model_es <- es(train , model = fit , h = 12)
+  for(i in 1:13){
+    #Initializing cross validation 
+    x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+    test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+    refit <- ets(x , model = model)
+    refit_es <- es(x , model = refit , h = 12)
+    #Getting results for each origin
+    if (multi_error==TRUE){
+      upper_emp <- mu_direct_quant(refit_es , 0.95)[[2]]
+      lower_emp <- mu_direct_quant(refit_es , 0.95)[[1]]
+      EMP_mat[i,] <- ISs(test, upper_emp , lower_emp , 0.05)
+      
+      upper_kde <- mu_kde_quant(refit_es , 0.95)[[2]]
+      lower_kde <- mu_kde_quant(refit_es , 0.95)[[1]]
+      KDE_mat[i,] <- ISs(test, upper_kde , lower_kde , 0.05)
+    }
+    else {
+      upper_emp <- direct_quant(refit_es , 0.95)[[2]]
+      lower_emp <- direct_quant(refit_es , 0.95)[[1]]
+      EMP_mat[i,] <- ISs(test, upper_emp , lower_emp , 0.05)
+      
+      upper_kde <- kde_quant(refit_es , 0.95)[[2]]
+      lower_kde <- kde_quant(refit_es , 0.95)[[1]]
+      KDE_mat[i,] <- ISs(test, upper_kde , lower_kde , 0.05)      
+    }
+
+  }
+  
+  to_return['Direct Empirical'] <- colMeans(EMP_mat)
+  to_return['KDE Empirical'] <- colMeans(KDE_mat)  
+  return(to_return)
+  #return(KDE_mat)
+}
+
+
+#For MSE.
+cross_val_mse <- function(model , h ){
+    
+    #Initializing
+    train <- window(AirPassengers , end = 1958.99)
+    test <- window(AirPassengers , start = 1959)
+    n <- length(test) - h + 1
+
+    #A matrix for each on of the methods
+    MSE_means <- rep(NA,n)
+    MSE_mat <- matrix(NA , nrow = n , ncol = h)
+    for(i in 1:13){
+      #Initializing cross validation 
+      x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+      test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+      refit <- ets(x , model = model)
+      refit_es <- es(x , model = refit , h = 12)
+      point <- forecast(refit_es , 12)
+      MSE_mat[i,] <- (test-point$forecast)^2
+      MSE_means[i] <- mse(test,point$forecast) }
+    #return(colMeans(MSE_mat))
+    return(MSE_mat)}
+    
+
+```
+
+Results:
+
+
+```{r}
+#AAAemp_res <- cross_val_empirical('AAA' , 12 )
+#MAAemp_res <- cross_val_empirical('MAA' , 12 )
+MAMemp_res <- cross_val_empirical('MAM' , 12 )
+MAM_means <- cross_val_mse('MAM' , 12)
+#qqq <- cross_val_empirical('MAM' , 12 )
+
+
+```
+
+
+
+```{r}
+#AAA_es <- es(train_set , model = AAA , h = 12 , damped = FALSE)
+#MAA_es <- es(train_set , model = MAA , h = 12 , damped = FALSE)
+MAM_es <- es(train_set , model = MAM , h = 12 , damped = FALSE)
+flag <- TRUE
+while (flag == TRUE){
+  flag <- FALSE
+  simmulationsMAM <- (matrix(0, 12 ,10000))
+  for (i in 1:10000){
+    simmulationsMAM[,i] <- simulate(MAM , 12 )
+  }
+  sim <- full_mean_kde(simmulationsMAM , 0.95)
+  for (i in 1:2){
+    if (sum(is.na(sim[[i]]))!=0){
+      flag <- TRUE
+
+    } }
+}
+
+flag <- TRUE
+while (flag == TRUE){
+  flag <- FALSE
+  bootMAM <- (matrix(0, 12 ,10000))
+  for (i in 1:10000){
+    bootMAM[,i] <- simulate(MAM , 12 , bootstrap = TRUE )
+  }
+  boot <- full_mean_kde(bootMAM , 0.95)
+  for (i in 1:2){
+    if (sum(is.na(boot[[i]]))!=0){
+      flag <- TRUE
+
+    } }
+}
+```
+
+
+Plotting the results on optimal MAM model:
+
+
+```{r}
+
+no_mean_df <- MAMemp_res
+no_mean_df['Algebric'] <- alg_res$MAM_cv[1:12]
+par(bg = 'aliceblue')
+
+plot(no_mean_df$h , no_mean_df$`Direct Empirical`, type='o', col='red' , ylim=c(40,260) ,pch = 1,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=2)
+lines(no_mean_df$h , no_mean_df$`KDE Empirical` , col = 'blue ' ,lwd=1,type='o' ,pch=2)
+#lines(no_mean_df$h , boot_res$`Mean KDE` , col = 'yellow ',lwd=1 ,type='o' ,pch=2)
+#lines(no_mean_df$h , sim_res$`Mean KDE` , col = 'purple ' ,lwd=1 ,type='o',pch=3)
+lines(no_mean_df$h , no_mean_df$Algebric , col = 'green',lwd=1 ,type='o',pch=3)
+title(main = "Interval Scores Comparisson for MAM" , sub='Figure 4.1',cex.sub=0.9 , font.main=3 , col.sub='red3')
+
+legend(0.7, 220, legend = c("ErrorsDirect" , "ErrorsKDE" ,"Algebric forecast")
+         ,col=c("red", "blue" , "green"),lty=1, cex=0.8 , pch=c(0,1,2,4)) 
+
+
+print(MAMemp_res)
+
+```
+
+Comparing the Intervals produced by the two methods on the last three horizons to explore their behaviour:
+
+```{r}
+density_quant <- function(model , a ){
+  a <- (1-a)/2 + c(0,1)*a 
+  errors <- model$errors
+  er <- errors[-(1:12),] 
+  low <- rep(0,12)
+  up <- rep(0,12)
+  for (h in 1:12){
+    density <- density.default(er[,h],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity)
+    
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y 
+      if (is.na(x[i])){
+        idx <- order(abs(kcde-a[i]))[2:3] 
+        x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y         
+      }
+    }
+    low[h] <- x[1]
+    up[h] <- x[2]
+  }
+  return(list(low[1:12],up[1:12]))  
+}
+
+```
+
+Plotting : 
+
+```{r, fig.height=4, fig.width=8}
+par(mfrow=c(1,3),bg = 'aliceblue')
+errors <- MAM_es$errors
+er <- errors[-(1:12),]
+
+
+up <- density_quant(MAM_es , 0.95)[[2]]
+low <- density_quant(MAM_es , 0.95)[[1]]
+
+for (i in 10:12){
+
+  hist(er[,i] ,breaks=25, col='red' ,xlab ='Observation' ,
+      main=paste("h = ",i) ,freq = FALSE)
+  abline(v=quantile(er[,i],c(0.05,0.95))[1], col="green", lwd=2, lty=2 )
+  abline(v=quantile(er[,i],c(0.05,0.95))[2], col="green", lwd=2, lty=2)
+  abline(v=up[i], col="blue", lwd=2, lty=2 )
+  abline(v=low[i], col="blue", lwd=2, lty=2)
+  dens <- density(er[,i], bw = 'nrd0' , kernel ="epanechnikov")
+  lines(dens,col = 'black' ,lwd=3 )
+  
+
+}
+mtext("Figure 4.2", side = 1, line = -0.9, outer = TRUE , col = 'red3')
+```
+
+
+
+Comparing the PIs produced from the various methods:
+
+```{r, fig.height=8, fig.width=10}
+par(mfrow=c(2,2),bg = 'aliceblue')
+asd <- forecast(MAM_es , 12 )
+
+#Error KDE
+up<-mu_kde_quant(MAM_es , 0.95)[[2]]
+low <-mu_kde_quant(MAM_es , 0.95)[[1]]
+
+plot(c(1:12),test_set , type='l' , lwd = 2 , col='red' , xlab='Horizon' , ylab ='Value' ,ylim=c(330,700) , main = "Empirical KDE")
+lines(c(1:12),up,lwd=2)
+lines(c(1:12),low,lwd=2)
+lines(c(1:12) , asd$mean , lwd = 2 ,col = 'blue')
+#legend(1,550,legend = c("True","Predicted") , col = c("red" , "blue "),lty=1 )
+polygon(c(c(1:12), rev(c(1:12))),c(up, rev(low)), 
+        density = c(20, 30),
+     col = 'yellow3', border = NA)
+
+#Boot KDE
+
+up<-boot[[2]]
+low <-boot[[1]]
+
+plot(c(1:12),test_set , type='l' , lwd = 2 , col='red' , xlab='Horizon' , ylab ='Value' ,ylim=c(330,700) , main = "Mean-KDE on Bootsrap")
+lines(c(1:12),up,lwd=2)
+lines(c(1:12),low,lwd=2)
+lines(c(1:12) , asd$mean , lwd = 2 ,col = 'blue')
+#legend(1,550,legend = c("True","Predicted") , col = c("red" , "blue "),lty=1 )
+polygon(c(c(1:12), rev(c(1:12))),c(up, rev(low)), 
+        density = c(20, 30),
+     col = 'yellow3', border = NA)
+
+#Error KDE
+up<-sim[[2]]
+low <-sim[[1]]
+
+plot(c(1:12),test_set , type='l' , lwd = 2 , col='red' , xlab='Horizon' , ylab ='Value' ,ylim=c(330,700) , main = "Mean - KDE on Sim")
+lines(c(1:12),up,lwd=2)
+lines(c(1:12),low,lwd=2)
+lines(c(1:12) , asd$mean , lwd = 2 ,col = 'blue')
+#legend(1,550,legend = c("True","Predicted") , col = c("red" , "blue "),lty=1 )
+polygon(c(c(1:12), rev(c(1:12))),c(up, rev(low)), 
+        density = c(20, 30),
+     col = 'yellow3', border = NA)
+
+#Boot KDE
+
+up<-algebricMAM$upper[,2]
+low <-algebricMAM$lower[,2]
+
+plot(c(1:12),test_set , type='l' , lwd = 2 , col='red' , xlab='Horizon' , ylab ='Value' ,ylim=c(330,700) , main = "Algebric ")
+lines(c(1:12),up,lwd=2)
+lines(c(1:12),low,lwd=2)
+lines(c(1:12) , asd$mean , lwd = 2 ,col = 'blue')
+#legend(1,550,legend = c("True","Predicted") , col = c("red" , "blue "),lty=1 )
+polygon(c(c(1:12), rev(c(1:12))),c(up, rev(low)), 
+        density = c(20, 30),
+     col = 'yellow3', border = NA)
+
+mtext("Figure 4.3", side = 1, line = -1.5, outer = TRUE , col = 'red3')
+```
+
+
+Comparing the CrossValidated Interval Scores :
+
+```{r}
+validated <- data.frame(h)
+
+validated['Algebric'] <- alg_res$MAM_cv
+validated['Sim_Empirical'] <- MAMsim_res$`Direct EMP`
+validated['Sim KDE'] <- MAMsim_res$`Mean KDE`
+validated['Boot Empir'] <- MAMboot_res$`Direct EMP`
+validated['Boot KDE'] <- MAMboot_res$`Mean KDE`
+validated['Error Empirical'] <- MAMemp_res$`Direct Empirical`
+validated['Error KDE'] <- MAMemp_res$`KDE Empirical`
+
+print(validated)
+```
+
+Plotting:
+
+
+```{r, fig.height=5, fig.width=8}
+#Getting the method that produced the best MIS on the simmulation method!
+
+par(bg = 'aliceblue')
+plot(c(1:12) , validated$`Algebric`, type='l', col='red' , ylim=c(50,270) ,pch = 1,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=1.5)
+lines(c(1:12) , validated$`Sim_Empirical` , col = 'blue ' ,lwd=0.5 ,type='o' ,pch=2)
+lines(c(1:12) , validated$`Sim KDE` , col = 'yellow ',lwd=1 ,type='o' ,pch=3)
+lines(c(1:12) , validated$`Boot Empir` , col = 'purple ' ,lwd=1 ,type='o',pch=4)
+lines(c(1:12), validated$`Boot KDE`, col = 'green',lwd=1 ,type='o',pch=5)
+lines(c(1:12), validated$`Error Empirical`, col = 'black',lwd=1 ,type='o',pch=6)
+lines(c(1:12), validated$`Error KDE`, col = 'brown',lwd=1 ,type='o',pch=7)
+
+title(main = "Methods Comparisson for MAM" , sub='Figure 4.4',cex.sub=0.9 , font.main=3 , col.sub='red3')
+
+legend("topleft", legend = c("Algebric" ,"Sim Empirical","Sim KDE" , "Boot Empirical", "Boot KDE",
+                            "Error Empirical" , "Error KDE")
+         ,col=c("red", "blue" , "yellow" , "purple" , "green" , "black" , "brown"),
+       lty=1, cex=0.8 , pch=c(1,2,3,4,5,6,7)) 
+print(validated)
+
+```
+
+
+
+Comparing the scores of the optimal MAM model vs two other non-optimal ones
+
+All methods described above will be used on two non Optimal ETS models(AAA and MAA) to validate the importance of using an optimal model when it comes to producing accurate Intervals.
+
+GMRAE will be used
+
+Defining the necessary functions:
+
+```{r}
+#Adjusting the functions:
+cross_val_algebric_adjusted <- function(model , h ){
+  #Initializing
+  train <- window(AirPassengers , end = 1958.99)
+  test <- window(AirPassengers , start = 1959)
+  n <- length(test) - h + 1
+  
+  lower <- rep(NA , 12)
+  upper <- rep(NA , 12)
+  #Every row is the IS of a 12-steps-ahead forecast
+  IS_mat <- matrix(NA , nrow = n , ncol = h)
+  fit <- ets(train , model = model)
+  for(i in 1:n){
+  #Adjusting the training set to include a new observation each time!
+    #New training set:
+    x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+    #New test set:
+    test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+    #Refitting:
+    refit <- ets(x , model = model)
+    #New forecast:
+    new_forecast <- forecast(refit , h = h)
+    #New intervals:
+    lower <- new_forecast$lower[,2]
+    upper <- new_forecast$upper[,2]
+    IS_mat[i , ] <- ISs(test , upper , lower , 0.05)
+    #Every row is a forecast for h = 12 
+    #In total I have 13 forecasts to evaluate
+  }
+  #The mean of every collumn is the mean IS for every every horizon h
+  
+return(IS_mat)
+}
+
+GMIS <- function(score,benchmark_score){
+  EnvStats::geoMean(abs(score/benchmark_score))
+}
+
+GMRAE_algebric <- function(model , h){
+  benchmark <- cross_val_algebric_adjusted('MAM' , 12)
+  results <- cross_val_algebric_adjusted(model , 12)
+  errors <- rep(NA , 12 )
+  for (i in 1:12){
+    errors[i] <- GMIS(results[,i],benchmark[,i])
+  }
+  return(errors)
+}
+
+
+```
+
+
+```{r}
+cross_val_simmulation_adjusted <- function(model , h , to_bootstrap){
+  #A dataframe for all scores
+  to_return <- data.frame(h = c(1:12))
+  #Initializing
+  train <- window(AirPassengers , end = 1958.99)
+  test <- window(AirPassengers , start = 1959)
+  n <- length(test) - h + 1
+  lower <- rep(NA , 12)
+  upper <- rep(NA , 12)
+  #A matrix for each on of the methods
+  DirectEMP_mat <- matrix(NA , nrow = n , ncol = h)
+  MeanKDE_mat <- matrix(NA , nrow = n , ncol = h)
+  fit <- ets(train , model = model)
+  for(i in 1:n){
+    #Initializing cross validation 
+    x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+    test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+    refit <- ets(x , model = model)
+    #Simmulating for the fitted model
+    sim_results <- single_row_results(refit , test , h , to_bootstrap)
+    DirectEMP_mat[i,] <- sim_results[[1]]
+    MeanKDE_mat[i,] <- sim_results[[4]]
+    
+  }
+
+  return(list(DirectEMP_mat,MeanKDE_mat)) }
+
+GMRAE_sim <- function(model , h , to_bootsrap = FALSE){
+  benchmark_emp <- cross_val_simmulation_adjusted('MAM' , 12,to_bootsrap)[[1]]
+  benchmark_kde <- cross_val_simmulation_adjusted('MAM' , 12,to_bootsrap)[[2]]
+  results_emp <- cross_val_simmulation_adjusted(model , 12,to_bootsrap)[[1]]
+  results_kde <- cross_val_simmulation_adjusted(model , 12,to_bootsrap)[[2]]
+  
+  errors_emp <- rep(NA , 12 )
+  errors_kde <- rep(NA , 12 )
+  for (i in 1:12){
+    errors_emp[i] <- GMIS(results_emp[,i],benchmark_emp[,i])
+    errors_kde[i] <- GMIS(results_kde[,i],benchmark_kde[,i])
+  }
+  return(list(errors_emp,errors_kde))
+}
+
+
+```
+
+```{r}
+cross_val_empirical_adjusted <- function(model , h ,multi_error=TRUE){
+    to_return <- data.frame(h = c(1:12))
+    #Initializing
+    train <- window(AirPassengers , end = 1958.99)
+    test <- window(AirPassengers , start = 1959)
+    n <- length(test) - h + 1
+    lower <- rep(NA , 12)
+    upper <- rep(NA , 12)
+    #A matrix for each on of the methods
+    EMP_mat <- matrix(NA , nrow = n , ncol = h)
+    KDE_mat <- matrix(NA , nrow = n , ncol = h)
+    fit <- ets(train , model = model)
+    #Converting to es
+    model_es <- es(train , model = fit , h = 12)
+  for(i in 1:13){
+    #Initializing cross validation 
+    x <- window(AirPassengers , end = 1958.99 + (i-1)/12)
+    test <- as.double(window(AirPassengers , start = 1959 + (i-1)/12 , end = 1959.99 + (i-1)/12))
+    refit <- ets(x , model = model)
+    refit_es <- es(x , model = refit , h = 12)
+    #Getting results for each origin
+    if (multi_error==TRUE){
+      upper_emp <- mu_direct_quant(refit_es , 0.95)[[2]]
+      lower_emp <- mu_direct_quant(refit_es , 0.95)[[1]]
+      EMP_mat[i,] <- ISs(test, upper_emp , lower_emp , 0.05)
+      
+      upper_kde <- mu_kde_quant(refit_es , 0.95)[[2]]
+      lower_kde <- mu_kde_quant(refit_es , 0.95)[[1]]
+      KDE_mat[i,] <- ISs(test, upper_kde , lower_kde , 0.05)
+    }
+    else {
+      upper_emp <- direct_quant(refit_es , 0.95)[[2]]
+      lower_emp <- direct_quant(refit_es , 0.95)[[1]]
+      EMP_mat[i,] <- ISs(test, upper_emp , lower_emp , 0.05)
+      
+      upper_kde <- kde_quant(refit_es , 0.95)[[2]]
+      lower_kde <- kde_quant(refit_es , 0.95)[[1]]
+      KDE_mat[i,] <- ISs(test, upper_kde , lower_kde , 0.05)      
+    }
+  }
+  
+  return(list(EMP_mat,KDE_mat))
+}
+GMRAE_emp <- function(model , h , multi_error=TRUE){
+  benchmark_emp <- cross_val_empirical_adjusted('MAM' , 12)[[1]]
+  benchmark_kde <- cross_val_empirical_adjusted('MAM' , 12)[[2]]
+
+  results_emp <- cross_val_empirical_adjusted(model , 12, multi_error)[[1]]
+  results_kde <- cross_val_empirical_adjusted(model , 12, multi_error)[[2]]
+  
+  errors_emp <- rep(NA , 12 )
+  errors_kde <- rep(NA , 12 )
+  for (i in 1:12){
+    errors_emp[i] <- GMIS(results_emp[,i],benchmark_emp[,i])
+    errors_kde[i] <- GMIS(results_kde[,i],benchmark_kde[,i])
+  }
+  return(list(errors_emp,errors_kde))
+}
+
+
+```
+
+Calculating GMRAE :
+
+```{r}
+AAA_geom <- data.frame(h=c(1:12))
+MAA_geom <- data.frame(h = c(1:12))
+
+
+
+AAA_geom['Algebric'] <- GMRAE_algebric('AAA',12)
+MAA_geom['Algebric'] <- GMRAE_algebric('MAA',12)
+
+AAA_sim <- GMRAE_sim('AAA',12)
+AAA_geom['Sim Emp'] <- AAA_sim[[1]]
+AAA_geom['Sim KDE'] <- AAA_sim[[2]]
+
+MAA_sim <- GMRAE_sim('MAA',12)
+MAA_geom['Sim Emp'] <- MAA_sim[[1]]
+MAA_geom['Sim KDE'] <- MAA_sim[[2]]
+
+AAA_bot <- GMRAE_sim('AAA',12 , TRUE)
+AAA_geom['Boot Emp'] <- AAA_bot[[1]]
+AAA_geom['Boot KDE'] <- AAA_bot[[2]]
+
+MAA_bot <- GMRAE_sim('MAA',12, TRUE)
+MAA_geom['Boot Emp'] <- MAA_bot[[1]]
+MAA_geom['Boot KDE'] <- MAA_bot[[2]]
+
+MAA_emp <- GMRAE_emp('MAA',12)
+MAA_geom['Error Emp'] <- MAA_emp[[1]]
+MAA_geom['Error KDE'] <- MAA_emp[[2]]
+
+AAA_emp <- GMRAE_emp('AAA',12 , FALSE)
+AAA_geom['Error Emp'] <- AAA_emp[[1]]
+AAA_geom['Error KDE'] <- AAA_emp[[2]]
+
+
+
+
+```
+
+Plotting
+
+For AAA:
+
+```{r, fig.height=5, fig.width=8}
+#Getting the method that produced the best MIS on the simmulation method!
+AAA_geom[13,] <- colMeans(AAA_geom)
+no_mean_df <- AAA_geom
+
+par(bg = 'aliceblue')
+plot(c(1:12) , no_mean_df[1:12,'Algebric'], type='l', col='red' , ylim=c(0.9,4) ,pch = 1,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=1.5)
+lines(c(1:12) , no_mean_df[1:12,'Sim Emp'] , col = 'blue ' ,lwd=0.5 ,type='o' ,pch=2)
+lines(c(1:12) , no_mean_df[1:12,'Sim KDE'] , col = 'yellow ',lwd=1 ,type='o' ,pch=3)
+lines(c(1:12) , no_mean_df[1:12,'Boot Emp'] , col = 'purple ' ,lwd=1 ,type='o',pch=4)
+lines(c(1:12), no_mean_df[1:12,'Boot KDE'], col = 'green',lwd=1 ,type='o',pch=5)
+lines(c(1:12), no_mean_df[1:12,'Error Emp'], col = 'black',lwd=1 ,type='o',pch=6)
+lines(c(1:12), no_mean_df[1:12,'Error KDE'], col = 'brown',lwd=1 ,type='o',pch=7)
+title(main = "GMRAE between Optimal MAM and AAA" ,
+      sub = paste("Mean Difference:" , round(mean(as.double(AAA_geom[13,2:8]))),2),cex.sub=0.9 , font.main=3 , col.sub='red3')
+
+legend(0.6, 4.1 , legend = c(paste("Algebric mean:",round(AAA_geom[13,'Algebric'],2)) ,
+                            paste("Sim EMP",round(AAA_geom[13,"Sim Emp"],2)),
+                           paste("Sim KDE",round(AAA_geom[13,"Sim KDE"],2)), 
+                           paste("Boot Emp",round(AAA_geom[13,"Boot Emp"],2)),
+                           paste("Boot KDE",round(AAA_geom[13,"Boot KDE"],2)),
+                            paste("Error Emp",round(AAA_geom[13,"Error Emp"],2)),
+                            paste("Error KDE",round(AAA_geom[13,"Error KDE"],2)) )
+                              
+         ,col=c("red", "blue" , "yellow" ,"purple","green"),lty=1, cex=0.8 , pch=c(0,1,2,3,4,5)) 
+
+```
+
+
+Plotting
+
+For MAA:
+
+```{r, fig.height=5, fig.width=8}
+MAA_geom[13,] <- colMeans(MAA_geom)
+no_mean_df <- MAA_geom
+
+par(bg = 'aliceblue')
+plot(c(1:12) , no_mean_df[1:12,'Algebric'], type='l', col='red' , ylim=c(0.9,4) ,pch = 1,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=1.5)
+lines(c(1:12) , no_mean_df[1:12,'Sim Emp'] , col = 'blue ' ,lwd=0.5 ,type='o' ,pch=2)
+lines(c(1:12) , no_mean_df[1:12,'Sim KDE'] , col = 'yellow ',lwd=1 ,type='o' ,pch=3)
+lines(c(1:12) , no_mean_df[1:12,'Boot Emp'] , col = 'purple ' ,lwd=1 ,type='o',pch=4)
+lines(c(1:12), no_mean_df[1:12,'Boot KDE'], col = 'green',lwd=1 ,type='o',pch=5)
+lines(c(1:12), no_mean_df[1:12,'Error Emp'], col = 'black',lwd=1 ,type='o',pch=6)
+lines(c(1:12), no_mean_df[1:12,'Error KDE'], col = 'brown',lwd=1 ,type='o',pch=7)
+title(main = "GMRAE between Optimal MAM and MAA" ,
+      sub = paste("Mean Difference:" , round(mean(as.double(MAA_geom[13,2:8]))),2),cex.sub=0.9 , font.main=3 , col.sub='red3')
+
+legend(0.6, 4.1 , legend = c(paste("Algebric mean:",round(MAA_geom[13,'Algebric'],2)) ,
+                            paste("Sim EMP",round(MAA_geom[13,"Sim Emp"],2)),
+                           paste("Sim KDE",round(MAA_geom[13,"Sim KDE"],2)), 
+                           paste("Boot Emp",round(MAA_geom[13,"Boot Emp"],2)),
+                           paste("Boot KDE",round(MAA_geom[13,"Boot KDE"],2)),
+                            paste("Error Emp",round(MAA_geom[13,"Error Emp"],2)),
+                            paste("Error KDE",round(MAA_geom[13,"Error KDE"],2)) )
+                              
+         ,col=c("red", "blue" , "yellow" ,"purple","green"),lty=1, cex=0.8 , pch=c(0,1,2,3,4,5)) 
+
+```
+
+

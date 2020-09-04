@@ -1,0 +1,1161 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+In this notebook, all the methods defined before will be applied on the various time series and the aggregate results will be saved for comparissons.
+
+
+
+```{r}
+library(Mcomp)
+library(xgboost)
+library(mlr)
+library(parallel)
+library(parallelMap)
+library(tidyr)
+library(tseries)
+#library(Metrics)
+library(forecast)
+library(EnvStats) #for geometric mean
+#library(Metrics) # for MASE
+library(ggplot2)
+library(smooth)
+library(xts)
+library(data.table)
+
+```
+
+
+## Defying Functions:
+
+Interval Score and GMRAE
+
+```{r}
+#the ID function for IS bellow
+Id <- function(a , b){
+  if (a > b) 1
+  else 0
+}
+#Interval Score for a single Interval
+IS <- function (true, upper , lower , a){ #Interval Score
+  (upper - lower ) + 2/a *(lower - true)*Id(lower,true) + 2/a*(true - upper)*Id(true,upper)
+}
+#Mean Interval Score
+ISs <- function(true,upper,lower,a){ 
+  ISs <- rep(0,length(true))
+  for (i in 1:length(ISs)){
+    
+    ISs[i] <- IS(true[i],upper[i],lower[i],a)
+  }
+  ISs #returns Interval Scores
+}
+
+GMIS <- function(score,benchmark_score){
+  EnvStats::geoMean(abs(score/benchmark_score))
+}
+```
+
+Functions to extract intervals
+
+```{r}
+full_direct_quant <- function(data , level,h){
+  upper <- seq(0,h)
+  lower <- seq(0,h)
+  prob <- c(1-level , level)
+  for (i in 1:h){
+    quant <- quantile(data[i,] , prob)
+    lower[i] <- as.double(quant[1])
+    upper[i] <- as.double(quant[2])
+  }
+  return(list(lower[1:h],upper[1:h]))
+}
+#Second method -> mean and sigma
+full_mean_sigma <- function(data , level,h) {
+  upper <- seq(0,h)
+  lower <- seq(0,h)
+  z <- qnorm(c((1-level)/2,(1+level)/2))
+  for (i in 1:h){
+    mu_forecast <- mean(data[i,])
+    #errors <- data - mu_forecast
+    sigma <- sqrt(Metrics::mse(mu_forecast,data[i,]))
+    quant <- mu_forecast + sigma * z
+    lower[i] <- as.double(quant[1])
+    upper[i] <- as.double(quant[2])
+  }
+  return(list(lower[1:h],upper[1:h])) }
+#mean_sigma(simmulationsAAA[12,],0.95)  
+
+#Third method -> mean empirical
+full_mean_empirical <- function(data , level,h ){
+  
+  lower <- seq(0,h)
+  upper <- seq(0,h)
+  probs <- c(1-level,level)
+  for (i in 1:h){
+    mu_forecast = mean(data[i,])
+    errors <- data[i,] - mu_forecast
+    error_quant <- quantile(errors, prob =probs )
+    quant <- mu_forecast + error_quant
+    lower[i] <- quant[1]
+    upper[i] <- quant[2]
+  }
+  return(list(lower[1:h],upper[1:h])) }
+
+#Forth method -> KDE
+full_mean_kde <- function(data , level,h ){
+  #using Silvermans bandwidth and epanechnikov kernel
+  upper <- seq(0,h)
+  lower <- seq(0,h)
+  q <- (1-level)/2 + c(0,1)*level
+  for (i in 1:h){
+    mu_forecast <- mean(data[i,])
+    errors <- data[i,] - mu_forecast
+    kde <- density(errors , bw = 'nrd0' , kernel ="epanechnikov")
+    kcde <- cumsum(kde$y)/max(cumsum(kde$y))
+    q <- (1-level)/2 + c(0,1)*level
+    quant <-rep(0,2)
+    
+    for (j in 1:2){
+        idx <- order(abs(kcde-q[j]))[1:2]
+        #for manfWeek Errors on approx function cuz they are equal
+        if (kcde[idx][1]==kcde[idx][2]){
+            kcde[idx][2]<-kcde[idx][2]+0.000001
+          
+        }
+        quant[j] <- approx(kcde[idx],kde$x[idx],xout=q[j],rule=2)$y
+    #rule = 2 returns the value that is closest to the extreme, if x is not in the interval
+
+    
+  }
+    lower[i] <- mu_forecast + quant[1]
+    upper[i] <- mu_forecast + quant[2]
+}
+  return(list(lower[1:h],upper[1:h])) }
+
+#Function that return IS scores for 12-steps-ahead for each one of the 4 methods
+#Will be used 13 times!
+single_row_results <- function(fitted_model ,level , test_set , h ,to_bootstrap=FALSE ){
+  #Initializing
+  direct_quant <- rep(NA , h)
+  Mean_Sigma <- rep(NA , h )
+  Mean_Emp <- rep(NA , h )
+  Mean_KDE <- rep(NA , h)
+  flag <- TRUE
+  while (flag == TRUE){
+    flag <- FALSE
+    simmulations <- (matrix(0, h ,10000))
+    for (i in 1:10000){
+      #Simmulating for the given fitted model and the given h
+      simmulations[,i] <- simulate(fitted_model, h ,bootstrap = to_bootstrap)
+      
+    }
+    #Getting the results
+    method1 <- full_direct_quant(simmulations , level , h)
+    method2 <- full_mean_sigma(simmulations , level, h)
+    method3 <- full_mean_empirical(simmulations , level, h)
+    method4 <- full_mean_kde(simmulations , level, h)
+    for (i in 1:2){
+      if (sum(is.na(method4[[i]]))!=0  ||
+          sum(is.na(method3[[i]]))!=0 ||
+          sum(is.na(method2[[i]]))!=0 ||
+          sum(is.na(method1[[i]]))!=0 ){
+        flag <- TRUE
+   
+      } }
+  }
+  #Setting the return values
+    direct_quant <- c(ISs(test_set,method1[[2]],method1[[1]],(1-level)))
+    Mean_Sigma <- ISs(test_set,method2[[2]],method2[[1]],(1-level))
+    Mean_Emp <- ISs(test_set,method3[[2]],method3[[1]],(1-level))
+    Mean_KDE <- ISs(test_set,method4[[2]],method4[[1]],(1-level))
+    
+    #return the results
+    return(list(direct_quant,Mean_Sigma,Mean_Emp,Mean_KDE))
+    }
+```
+
+Functions to extract intervals for empirical methods
+
+```{r}
+direct_quant <- function(model , level, h ){
+  a <- (1-level)/2 + c(0,1)*level
+  #Getting the errors:
+  errors <- model$errors
+  er <- errors[-(1:h),]
+  #initializing
+  low <- rep(0,h)
+  up <- rep(0,h)
+  lower <- rep(0,h)
+  upper <- rep(0,h)
+  #Calculating for each h
+  for (k in 1:h){
+    low[k] <- as.double( quantile( er[,k],a))[1] 
+    up[k] <- as.double( quantile( er[,k],a))[2]
+  }
+  mu_forecast <- forecast(model , h)
+  
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:h],upper[1:h]))
+}
+
+
+kde_quant <- function(model , level, h ){
+  a <- (1-level)/2 + c(0,1)*level
+  errors <- model$errors
+  er <- errors[-(1:h),]
+  low <- rep(0,h)
+  up <- rep(0,h)
+  for (k in 1:h){
+    density <- density.default(er[,k],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity)
+    
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i],rule=2)$y 
+      #rule = 2 returns the value that is closest to the extreme, if x is not in the interval
+    }
+
+    low[k] <- x[1]
+    up[k] <- x[2]
+  }
+  mu_forecast <- forecast(model , h)
+  
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:h],upper[1:h]))  
+  }
+#Reference: trnnick , (2017),TStools -> intervals-empirir , GitHub repository https://github.com/trnnick/TStools/blob/master/R/intervals-empir.
+
+
+
+#Not sure if this is correct
+mu_sigma <- function(model , level , h){
+  a <- qnorm(c((1-level)/2,(1+level)/2))
+  errors <- model$errors
+  er <- errors[-(1:h),]
+  low <- rep(0,h)
+  up <- rep(0,h)
+  lower <- rep(0,h)
+  upper<-rep(0,h)
+  sigma <- rep(0,h)
+  for (k in 1:h){
+    sigma[k] <- sd(er[,k])
+    low <- sigma[k]*a[1]
+    up <- sigma[k]*a[2]
+    
+  }
+  mu_forecast <- forecast(model , h)
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:h],upper[1:h]))
+
+  
+}
+
+#For multiplicative models.
+#Not sure if this is correct
+mu_direct_quant <- function(model , level, h ){
+  a <- (1-level)/2 + c(0,1)*level
+  #Getting the errors:
+  errors <- model$errors
+  er <- errors[-(1:h),]
+  #initializing
+  low <- rep(0,h)
+  up <- rep(0,h)
+  lower <- rep(0,h)
+  upper <- rep(0,h)
+  #Calculating for each h
+  for (k in 1:h){
+    low[k] <- as.double( quantile( er[,k],a))[1] 
+    up[k] <- as.double( quantile( er[,k],a))[2]
+  }
+  mu_forecast <- forecast(model , h)
+  
+  lower <- mu_forecast$mean + low * mu_forecast$mean
+  upper <- mu_forecast$mean + up * mu_forecast$mean
+  return(list(lower[1:h],upper[1:h]))
+}
+
+mu_kde_quant <- function(model , level , h ){
+  a <- (1-level)/2 + c(0,1)*level 
+  errors <- model$errors
+  er <- errors[-(1:h),] 
+  low <- rep(0,h)
+  up <- rep(0,h)
+  for (k in 1:h){
+    density <- density.default(er[,k],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity) #increase it to include the approximated value.
+                                   #assure that x is inside kcde.
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i],rule=2)$y 
+  #rule=2 returns the nearest extreme if value is outside the interval
+    }
+    low[k] <- x[1]
+    up[k] <- x[2]
+  }
+  mu_forecast <- forecast(model , h)
+  
+  lower <- mu_forecast$mean + low * mu_forecast$mean
+  upper <- mu_forecast$mean + up * mu_forecast$mean
+  return(list(lower[1:h],upper[1:h]))  
+  }
+```
+
+Functions for xgboost -> point forecasts
+
+A new function is defined here:
+
+* train_test_split -> Splits the dataset into train and test sets
+
+ 
+
+```{r}
+#function to create lags
+create_lags <- function(data , lags ){
+  n <- length(data)
+  #lags + 1 for the actual true value!
+  X <- array(NA , c(n,lags + 1))
+  for (i in 1:(lags + 1)){
+    #Adding values from the training set 
+    X[i:n,i] <- data[1:(n-i+1)]
+  }
+  #Renaming for the lags:
+  colnames(X) <- c("y",paste0("lag",1:lags))
+  #df_toReturn <- as.data.frame(X)
+  return(X)
+}
+
+forecasted1 <- function(test_set , h , fit_model){
+  asd <- test_set
+  #Removes "lag" from columns and gets only the numbers(For example lag1,lag5,lag9 -> 1,5,9)
+  for ( i in 1:length(colnames(asd))){
+    colnames(asd)[i] <- gsub("[a-zA-Z ]", "",colnames(asd)[i] )
+  }
+  cols <- as.double(colnames(asd))
+  
+  forecasted <- array(NA , c(h,1))
+    for (i in 1:h){
+      zz <- asd[i,]
+  
+      lagged <- zz[length(zz):1]
+      n <- length(zz)
+      lagged <- c(zz,forecasted)
+      #lagged <- lagged[n:1]
+      lagged <- array(lagged, c(1,n))
+      #print(lagged)
+      #print.data.frame(test_set[1,])
+      #colnames(lagged) <- colnames(t(test_set[1,]))
+      colnames(lagged) <- colnames((test_set[1,])) #Dont know about this one or the above
+      #print(lagged)
+          
+      #Converting to array similar to x_train for xgboost
+      to_predict <- as.data.frame(lagged )
+      #print.data.frame(to_predict[1,])
+      prediction <- predict(fit_model, newdata = to_predict)
+      forecasted[i] <- prediction$data[[1]]
+      #(length - i) is a formula taken above -> to make changes on the lags due to forecasts
+      if (i < length(cols)){
+        for (j in (1:(length(cols)-i))){
+          #i is for the above(to get the exact formula check box above)
+            asd[i + cols[j],j] <- prediction$data[[1]]
+            #print((length(cols)-i))
+            #print(asd[i + cols[j],j])
+    #print(i)
+        }
+  }
+    }
+  return(forecasted)
+}
+
+forecasted2 <- function(test_set , h , fit_model){
+  asd <- test_set
+  for ( i in 1:length(colnames(asd))){
+    colnames(asd)[i] <- gsub("[a-zA-Z ]", "",colnames(asd)[i] )
+  }
+  cols <- as.double(colnames(asd))
+  
+  forecasted <- array(NA , c(h,1))
+    for (i in 1:h){
+      zz <- asd[i,]
+  
+      lagged <- zz[length(zz):1]
+      n <- length(zz)
+      lagged <- c(zz,forecasted)
+      #lagged <- lagged[n:1]
+      lagged <- array(lagged, c(1,n))
+      #print(lagged)
+      #print.data.frame(test_set[1,])
+      colnames(lagged) <- colnames(t(test_set[1,]))
+      #colnames(lagged) <- colnames((test_set[1,])) #Dont know about this one or the above
+      #print(lagged)
+          
+      #Converting to array similar to x_train for xgboost
+      to_predict <- as.data.frame(lagged )
+      #print.data.frame(to_predict[1,])
+      prediction <- predict(fit_model, newdata = to_predict)
+      forecasted[i] <- prediction$data[[1]]
+      #(length - i) is a formula taken above -> to make changes on the lags due to forecasts
+      if (i < length(cols)){
+        for (j in (1:(length(cols)-i))){
+          #i is for the above(to get the exact formula check box above)
+            asd[i + cols[j],j] <- prediction$data[[1]]
+            #print((length(cols)-i))
+            #print(asd[i + cols[j],j])
+    #print(i)
+        }
+  }
+    }
+  return(forecasted)
+}
+
+train_test_split <- function(df , h){
+  #keeps last 24 years for test set
+  train_upper <- dim(df)[1] - 2*h
+  #Will just use to train the initial xgboost and take the hyperparamters
+  optimize_train_upper <- dim(df)[1] - h
+  x_train <- df[1:train_upper,]
+  # x_train_optimize is the sample of the series which will be used to finetune XGBoost's hyperparamters
+  x_train_optimize <- df[1:optimize_train_upper,]
+  y_train <- df[1:train_upper,"y"]
+  #Test set for cv:
+  test_lower <- train_upper + 1
+  test_upper <- dim(df)[1]
+  x_test <- df[test_lower:test_upper,-1]
+  #If there is only one lagged collumn
+  if (is.null(dim(x_test)[1])){
+    x_test <- as.matrix(df[test_lower:test_upper,-1])
+    colnames(x_test) <- colnames(df)[2]
+  }
+  y_test <- df[test_lower:test_upper,"y"]
+  return(list(x_train,y_train,x_test,y_test,x_train_optimize))
+  }
+
+
+
+```
+
+Functions for XGBoost -> intervals
+
+New functions defined here:
+
+* ml_preprocess -> Applies the pre_processing steps necessary to prepare the dataset for the model
+  1. Returns the lagged dataframe
+  2. Returns the dataframe to stationary
+  3. Returns the dataframe seasonaly adjusted
+  4. Returns the number of differences and seasonal differences necessary to convert the df into stationary
+  
+* get_errors -> Returns the in-sample errors of the fitted XGBoost model for a single time step
+
+* optimizer -> Automaticaly tunes the hyperparameters of the model.
+
+```{r}
+#Pre_process => returns the lagged matrix,the final stationary matrix,the season adjusted df and the number of 
+#seasonal variations and normal variations
+ml_preprocess <- function(df , h) {
+  #For seasonality
+  seasonal_dif_number <- nsdiffs(df)
+  frequency <-  frequency(df)
+  #If no need for seasonal dif
+  if (seasonal_dif_number!=0) {
+    df_seasdif <- diff(df , lag = frequency , differences = seasonal_dif_number )
+  }
+  else {
+    df_seasdif <- df
+    }
+  
+  dif_num <- ndiffs(df_seasdif)
+  #This condition is what i added
+  #If no need for single differences -> just for seasonality
+  if (dif_num!=0){
+    df_stat <- diff(df_seasdif, lag = 1 , differences= dif_num)
+  }
+  else{
+    df_stat <- df_seasdif
+  }
+  
+  #Get significant lags:
+  p_acf_vals <- pacf(df_stat , h ,pl = FALSE)$acf
+  #Thresholds -0.1 and 0.1 were picked by me => might change
+  significant_lags <- which((p_acf_vals>=0.1)|(p_acf_vals<=-0.1))
+  #Create Lags
+  lag_df <- create_lags(df_stat , h)
+  #Keep only the significant
+  significant <- "y"
+  for (i in significant_lags) {
+    significant <- cbind(significant , paste("lag",i,sep=""))
+    #print(i)
+    }
+  lag_df <- lag_df[,significant]
+
+
+  return(list(lag_df, df_stat , df_seasdif , seasonal_dif_number,dif_num ))
+}
+
+#Function to get the errors
+#Check again 
+get_errors <- function(h, stat_df ,season_df ,fitted_model ,train_adj, k, starting_df,i_test_top,rows_na ){
+  #Getting forecasts/predictions for a 12-part of the training set
+  #Getting the interval bellow
+  a <- 1 + (k-1) 
+  b <- h + (k-1) #12 stands for h
+  partial_train <- train_adj[a:b,] #getting the part to initialize the 12-steps forecast
+  
+  partial_train <- partial_train[,-1] #removing "y" collumn
+  dim_flag <- FALSE
+  if (is.null(dim(partial_train)[1])){
+    partial_train <- train_adj[a:b,]
+    partial_train <- as.matrix(partial_train[,-1])
+    colnames(partial_train) <- colnames(train_adj)[2]
+    dim_flag <- TRUE
+  }
+  if (dim_flag==TRUE) {fc_cv <- forecasted2(partial_train , h ,fitted_model )}
+  else {fc_cv <- forecasted1(partial_train , h ,fitted_model )} #forecasting 12 step on training set.
+  stat_df <- stat_df[1:i_test_top] #Giving the upper boundary to the stationary set(I dont need the whole)
+      
+  df_pred <- stat_df #df_stat
+  df_true <- stat_df
+  seasonal_dif_number <- nsdiffs(starting_df)
+  dif_num <- ndiffs(season_df)
+
+
+  df_pred[(a+rows_na):(b+rows_na)] <- fc_cv #Adding the forecast, i jumped rows_na to add the predictions!
+  if (dif_num!=0){
+    #If there is a need for normal differences
+      rev1_pred <- diffinv(df_pred , lag = 1 ,xi = season_df[1])
+      rev1_true <- diffinv(df_true , lag = 1 ,xi = season_df[1])}
+      #rev1_true <- rev1_true[-1] #Doing it all at once
+      #rev1_pred <-rev1_pred[-1]}#removing first to match(due to single difference->lag=1)
+  else{ #Just the same
+    rev1_pred <- df_pred
+    rev1_true <- df_true
+  }
+  #If there is a need for seasonal variations
+  if (seasonal_dif_number!=0){
+      rev2_pred <- diffinv(rev1_pred , lag = h , xi = starting_df[1:h])
+      rev2_true <- diffinv(rev1_true , lag = h , xi = starting_df[1:h])
+      #rev2_true <- rev2_true[-(1:(h))] #removing whole first row
+      #rev2_pred <-rev2_pred[-(1:(h))] #It was h+1 but i got the one on the normal differences abouve
+  }
+  else{
+    rev2_pred <- rev1_pred
+    rev2_true <- rev1_true
+  }
+  if ((seasonal_dif_number!=0)&(dif_num!=0)){
+    rev2_true <- rev2_true[-(1:(h+1))]
+    rev2_pred <-rev2_pred[-(1:(h+1))]}
+  else if ((seasonal_dif_number!=0)&(dif_num==0)){
+    rev2_true <- rev2_true[-(1:h)]
+    rev2_pred <-rev2_pred[-(1:h)]}
+  else if ((seasonal_dif_number==0)&(dif_num!=0)){
+    rev2_true <- rev2_true[-1]
+    rev2_pred <-rev2_pred[-1]}
+         
+     
+  rev2_true_year <- rev2_true[(a+rows_na):(b+rows_na)]
+  rev2_pred_year <- rev2_pred[(a+rows_na):(b+rows_na)]
+  errors <- rev2_true_year - rev2_pred_year
+  return(errors) }
+  
+#Returns the trained - optimized model and the tuned hyperparameters
+#detach("package:Metrics", unload=TRUE)
+optimizer <- function(x_train){
+  x_train_mlr_cv <- as.data.frame(x_train)
+  #Creating task
+  ml_task_cv <- makeRegrTask(data = x_train_mlr_cv , target = "y")
+    learner_cv <- makeLearner("regr.xgboost", config = list(show.learner.output = FALSE))
+    learner_cv$par.vals <- list( objective="reg:squarederror")
+    cv_folds_cv <- makeResampleDesc("CV",iters=5L)
+    ctrl_cv <- makeTuneControlRandom(maxit = 75L) 
+    
+    #These are for the AirPassenger -> might tune more
+    model_Params_cv <- makeParamSet(
+      makeDiscreteParam("booster",values = c("gbtree","gblinear")),
+      makeIntegerParam("max_depth",lower=1L,upper=6L),
+      makeNumericParam("lambda",lower=0.5,upper=0.75), #regularizeation
+      makeNumericParam("eta", lower = 0.1, upper = 0.2),
+      makeNumericParam("subsample", lower = 0.5, upper = 0.85),
+      makeNumericParam("min_child_weight",lower=4,upper=10),
+      makeNumericParam("colsample_bytree",lower = 0.5,upper = 1),
+      makeIntegerParam("nrounds", lower=35L, upper = 100L)
+    )
+  
+    tuned_model_cv <- tuneParams(learner = learner_cv,
+                          task = ml_task_cv,
+                          resampling = cv_folds_cv,
+                          measures = mse,       #2 functions
+                          par.set = model_Params_cv,
+                          control = ctrl_cv, 
+                          show.info = FALSE)
+  new_model_cv <- setHyperPars(learner = learner_cv , par.vals = tuned_model_cv$x)
+  fit_cv <- train(learner = new_model_cv,task = ml_task_cv)
+  return(list(fit_cv,tuned_model_cv$x)) 
+  }
+
+  
+
+
+```
+
+
+XGB_interval :
+
+A function combining all the above defined functions: 
+
+Returns the dataframe with the Interval Scores of every method applied on an XGBoost model.
+
+Returns a dataframe with point forecast metrics
+
+
+```{r}
+#returns a df with the empirical results
+XGB_interval <- function(df,level,h,benchmark){
+
+  #Returns the lagged df
+  pre_proccesed <- ml_preprocess(df , h)
+  lag_df <- pre_proccesed[1][[1]]
+  df_stat <- pre_proccesed[2][[1]]
+  df_seasdif <- pre_proccesed[3][[1]]
+  seas_dif_num <- pre_proccesed[4][[1]]
+  dif_num <- pre_proccesed[5][[1]]
+  
+  
+  #Splitting
+  listed <- train_test_split(lag_df , h )
+  x_train <- listed[1][[1]]
+  y_train <- listed[2][[1]]
+  x_test <- listed[3][[1]]
+  y_test <- listed[4][[1]]
+  x_train_optimize <- listed[5][[1]]
+  #print(x_train)
+
+  n <- dim(x_test)[1] - h + 1
+  #If x_test has a single lag it returns a null dim so i am using this
+  #if (is.null(dim(x_test)[1])){n <- length(x_test) - h + 1}
+  lower <- rep(NA , h)
+  upper <- rep(NA , h)
+  #Initializing a matrix for each one of the methods -> For intervals
+  EMP_mat <- matrix(NA , nrow = n , ncol = h)  
+  KDE_mat <- matrix(NA , nrow = n , ncol = h) 
+  SIGMA_mat <- matrix(NA , nrow = n , ncol = h)
+  
+  #For point forecasts
+  MSE_mat <- matrix(NA , nrow = n , ncol = h)  
+  MAE_mat <- matrix(NA , nrow = n , ncol = h) 
+  ME_mat <- matrix(NA , nrow = n , ncol = h)
+  #Relative absolute error
+  RAE_mat <- matrix(NA , nrow = n , ncol = h)
+  
+  test_mat <- matrix(NA , nrow = n , ncol = h)
+  point_mat <- matrix(NA , nrow = n , ncol = h)
+  
+
+  #Fitting once -> optimizer returns the optimized xgboost model after tuning the hyperparams
+  #Using a bigger set just to fit and get better hyperparamters
+  tuned_and_fitted <- optimizer(x_train_optimize)
+  #Get the tunned model
+  fit_cv <- tuned_and_fitted[1][[1]]
+  #print("PreProcess and initial fit->CHECK")
+  for(i in 1:n){ 
+
+      #Updating training set
+      i_train_top <- dim(x_train)[1] + (i-1)
+      x_train_cv <- lag_df[1:i_train_top,]
+      #Updating test set
+      i_test_bot <- (dim(x_train)[1] + 1) + (i-1)
+      i_test_top <- (dim(x_train)[1] + h) + (i-1)
+      x_test_cv <- lag_df[i_test_bot:i_test_top,-1] 
+      if (is.null(dim(x_test_cv)[1])){
+        x_test_cv <- as.matrix(lag_df[i_test_bot:i_test_top,-1])
+        colnames(x_test_cv) <- colnames(lag_df)[2]
+  }
+      #print(x_test_cv)
+      y_test_cv <- lag_df[i_test_bot:i_test_top,'y']
+    
+      #Refitting the model
+      x_train_cv <- as.data.frame(x_train_cv)
+      ml_task_cv <- makeRegrTask(data = x_train_cv,target = "y")
+      learner_cv <- makeLearner("regr.xgboost", config = list(show.learner.output = FALSE))
+      learner_cv$par.vals <- list( objective="reg:squarederror")
+      #Checking only the hyperparamaters,taken from the optimized model!
+      new_model_cv <- setHyperPars(learner = learner_cv , par.vals = tuned_and_fitted[2][[1]])
+      fit_cv <- train(learner = new_model_cv , task = ml_task_cv)
+      #print("New Fit of the model->CHECK")
+    
+      #Errors
+      #Initializing errors set-up for every itteration:
+      
+      #Number of rows which are to be removed
+      rows_na <- length(unique(which(is.na(x_train_cv), arr.ind=TRUE)[,1])) 
+      #Removing row with NAs on cols to get errors
+      train_adj <- x_train_cv[complete.cases(x_train_cv), ] 
+      
+      train_adj <- train_adj[1:(dim(train_adj)[1]-(h-2)),] 
+      final_cv <- matrix(0 , 1 , h) 
+      
+      errors_cv <- matrix(NA , h ,(dim(train_adj)[1]-(h-1))  )
+      #Getting errors:
+      for (k in 1:(dim(train_adj)[1]-(h-1))){   
+        #getting the errors
+        errors_cv[,k] <- get_errors(h,df_stat ,df_seasdif 
+                                    ,fit_cv, train_adj, k, df , i_test_top, rows_na)
+      
+      }
+      #print(i)
+      #print(errors_cv)
+    #Getting mean-forecast
+      #print("Taking Errors->CHECK")
+      
+    #simmulations for obtaining the point forecast.
+    simmulations_cv <- (matrix(0, h ,100))
+  
+    for (z in 1:100){
+    
+      fit_cv_sim <- train(learner = new_model_cv, task = ml_task_cv)
+      #For some errors
+      #if (dim(x_test)[2]==1) {fc_cv <- forecasted1(x_test_cv, h , fit_cv_sim )}
+      fc_cv <- forecasted2(x_test_cv, h , fit_cv_sim )
+      #print(fc_cv)
+      #Inversing predicted
+      df_pred <- df_stat[1:i_test_top]
+      df_pred[i_test_bot:i_test_top] <- fc_cv
+      
+      if (dif_num!=0) rev1_pred <- diffinv(df_pred , lag = 1 ,xi = df_seasdif[1])
+      else rev1_pred <- df_pred
+      if (seas_dif_num!=0) rev2_pred <- diffinv(rev1_pred , lag = h , xi = df[1:h])
+      else rev2_pred <- rev1_pred
+       y_pred <- tail(rev2_pred, h)
+      simmulations_cv[,z] <- y_pred
+    }
+    #print(simmulations_cv)
+    #print("Getting Mean Forecast->CHECK")
+    mean_forecast_cv <- colMeans(t(simmulations_cv))
+    #print(mean_forecast_cv)
+  #Preparing to take the intervals:
+    direct <- list(rep(NA,h),rep(NA,h))
+    m_sigma <-list(rep(NA,h),rep(NA,h))
+    m_kde <-list(rep(NA,h),rep(NA,h))
+    
+    for (j in 1:2){
+      direct[[j]] <- full_direct_quant(errors_cv , level,h)[[j]] + mean_forecast_cv
+      m_sigma[[j]] <- full_mean_sigma(errors_cv , level,h)[[j]] + mean_forecast_cv
+      m_kde[[j]] <- full_mean_kde(errors_cv , level,h)[[j]] + mean_forecast_cv
+    }
+    
+
+    #print("Extracting Intervals->CHECK")
+    df_true_cv <- df_stat[1:i_test_top]
+    if (dif_num!=0) rev1_true_cv <- diffinv(df_true_cv , lag = 1 ,xi = df_seasdif[1])
+    else rev1_true_cv <- df_true_cv
+    if (seas_dif_num!=0) rev2_true_cv <- diffinv(rev1_true_cv , lag = h , xi = df[1:h])
+    else rev2_true_cv <-rev1_true_cv 
+    y_true_cv <- tail(rev2_true_cv , h)
+    test_set <- y_true_cv
+    #print(test_set)
+    #No need for now for the MSE mat
+    
+    #For point forecasts
+    MSE_mat[i,] <- (y_true_cv - mean_forecast_cv)^2
+    ME_mat[i,] <- y_true_cv - mean_forecast_cv
+    MAE_mat[i,] <- abs(y_true_cv - mean_forecast_cv)
+    RAE_mat[i,] <- (y_true_cv - mean_forecast_cv)^2/y_true_cv
+    #MSE_means[i] <- mse(test_set,mean_forecast_cv)
+    #sd_mat[i,] <- apply(t(errors_cv), 2, sd)
+    
+    EMP_mat[i,] <- ISs(test_set , direct[[2]] , direct[[1]] , (1-level))
+    SIGMA_mat[i,]<- ISs(test_set , m_sigma[[2]] , m_sigma[[1]], (1-level))
+    KDE_mat[i,]<- ISs(test_set , m_kde[[2]] , m_kde[[1]] , (1-level))
+    test_mat[i,] <- y_true_cv
+    point_mat[i,] <- mean_forecast_cv
+    #print(m_kde[[2]])
+    #print(m_kde[[1]])
+    #print(test_set)
+    #print(KDE_mat)
+    #print(paste(i,"check"))
+  
+  }
+  XGB_Direct <- rep(NA,h)
+  XGB_KDE <- rep(NA,h)
+  XGB_Sigma <- rep(NA,h)
+  #for (i in 1:h){
+   # XGB_Direct[i] <- GMIS(EMP_mat[,i],benchmark[,i])
+  #  XGB_KDE[i] <- GMIS(KDE_mat[,i],benchmark[,i])
+   # XGB_Sigma[i] <- GMIS(SIGMA_mat[,i],benchmark[,i])
+  #  }
+  #For intervals
+  IS_df <- data.frame(h = c(1:h))
+  IS_df['XGB_Direct'] <- XGB_Direct #colMeans(EMP_mat)
+  IS_df['XGB_KDE'] <- XGB_KDE 
+  IS_df['XGB_Sigma'] <- XGB_Sigma 
+  
+  #For Points
+  PS_df <- data.frame(h = c(1:h))
+  PS_df['XGB_MSE'] <- colMeans(MSE_mat)
+  PS_df['XGB_MAE'] <- colMeans(MAE_mat) 
+  PS_df['XGB_ME'] <- colMeans(ME_mat) 
+  PS_df['XGB_RAE'] <- colMeans(RAE_mat) 
+  return(list(EMP_mat,KDE_mat,SIGMA_mat,test_mat,point_mat))}
+```
+
+ETS_intervals:
+
+A function returning the interval scores of the various methods applied on the ETS models.
+
+In addition, it returns point forecast errors.
+
+
+
+```{r}
+#parallelStartSocket(cpus = detectCores())
+ETS_intervals <- function(data , level, model="Optimal" , h ){
+    IS_df <- data.frame(h = c(1:h))
+    PS_df <- data.frame(h = c(1:h))
+  
+    #Initializing
+    length_df <- length(data)
+    #test_start <- date_end(end(data)) #returns the start date of the test set
+    #Test set are the last two years,thats why i am removing 25(2 year+1) and 23 
+    train <- ts(data[1:(length_df-(2*h))] , frequency = h)
+    test <- ts(data[(length_df-(2*h-1)):length_df],frequency = h)
+    n <- length(test) - h + 1
+    lower <- rep(NA , h)
+    upper <- rep(NA , h)
+    #A matrix for each on of the methods
+    
+    #For intervals
+    EMP_mat <- matrix(NA , nrow = n , ncol = h)
+    KDE_mat <- matrix(NA , nrow = n , ncol = h)
+    BootDirectEMP_mat <- matrix(NA , nrow = n , ncol = h)
+    BootMeanSigma_mat <- matrix(NA , nrow = n , ncol = h)
+    BootMeanEMP_mat <- matrix(NA , nrow = n , ncol = h)
+    BootMeanKDE_mat <- matrix(NA , nrow = n , ncol = h)
+    SimDirectEMP_mat <- matrix(NA , nrow = n , ncol = h)
+    SimMeanSigma_mat <- matrix(NA , nrow = n , ncol = h)
+    SimMeanEMP_mat <- matrix(NA , nrow = n , ncol = h)
+    SimMeanKDE_mat <- matrix(NA , nrow = n , ncol = h)
+    Alg_mat <- matrix(NA , nrow = n , ncol = h)
+    
+    #For points
+    MSE_mat <- matrix(NA , nrow = n , ncol = h)
+    MAE_mat <- matrix(NA , nrow = n , ncol = h)
+    ME_mat <- matrix(NA , nrow = n , ncol = h)
+    RAE_mat <- matrix(NA , nrow = n , ncol = h)
+    
+    
+    #For errors
+    test_mat <- matrix(NA , nrow = n , ncol = h)
+    point_mat <- matrix(NA , nrow = n , ncol = h)
+    
+    
+    
+    if (model=="Optimal"){
+      fit <- ets(train)
+      }
+    else {
+      #Otherwise it is fitted on the given model
+      fit <- ets(train, model = model)
+    }
+    
+    #Converting to es
+    model_es <- es(train , model = fit , h = h)
+    
+    for(i in 0:(n-1)){
+      #print(i)
+      #Initializing cross validation 
+      x <- ts(data[1:(length_df-((2*h)-i))] , frequency = h)
+      #New test set:
+      a <- (length_df-(2*h-1)) + i #adds 1 every itteration
+      b <- (length_df-(2*h-1)) + i +(h-1) #11 steps forward
+      test <- data[a:b]
+      
+      #Refitting:
+      if (model=="Optimal"){
+        refit <- ets(x)}
+      else {
+      #Otherwise it is fitted on the given model
+        refit <- ets(x, model = model) }
+      
+      #Convertihg to smooth
+      refit_es <- es(x , model = refit , h = h)
+    
+      #Sim
+    sim_results <- single_row_results(refit ,level, test , h , FALSE)
+    SimDirectEMP_mat[(i+1),] <- sim_results[[1]]
+    SimMeanSigma_mat[(i+1),] <- sim_results[[2]]
+    SimMeanEMP_mat[(i+1),] <- sim_results[[3]]
+    SimMeanKDE_mat[(i+1),] <- sim_results[[4]]
+    #Bootstrap
+    boot_results <- single_row_results(refit ,level, test , h , TRUE)
+    BootDirectEMP_mat[(i+1),] <- boot_results[[1]]
+    BootMeanSigma_mat[(i+1),] <- boot_results[[2]]
+    BootMeanEMP_mat[(i+1),] <- boot_results[[3]]
+    BootMeanKDE_mat[(i+1),] <- boot_results[[4]]
+    #Algebric
+    new_forecast <- forecast(refit , h = h , level=level)
+    lower <- new_forecast$lower #HERE
+    upper <- new_forecast$upper #HERE
+    Alg_mat[(i+1), ] <- ISs(test , upper , lower , (1-level))
+    #Empirical
+    #If errors are multiplicative:
+    if (substring(refit$method, 5,5)=="M"){
+      #print("M")
+
+      upper_emp <- mu_direct_quant(refit_es , level, h)[[2]]
+      lower_emp <- mu_direct_quant(refit_es , level, h)[[1]]
+      upper_kde <- mu_kde_quant(refit_es , level, h)[[2]]
+      lower_kde <- mu_kde_quant(refit_es , level, h)[[1]]
+      
+      EMP_mat[(i+1),] <- ISs(test, upper_emp , lower_emp , (1-level))
+      KDE_mat[(i+1),] <- ISs(test, upper_kde , lower_kde , (1-level)) 
+    }
+    else {
+      #print("a")
+      upper_emp <- direct_quant(refit_es , level, h)[[2]]
+      lower_emp <- direct_quant(refit_es , level, h)[[1]]
+      upper_kde <- kde_quant(refit_es , level, h)[[2]]
+      lower_kde <- kde_quant(refit_es , level, h)[[1]]
+      
+      EMP_mat[(i+1),] <- ISs(test, upper_emp , lower_emp , (1-level))
+      KDE_mat[(i+1),] <- ISs(test, upper_kde , lower_kde , (1-level)) 
+    }
+    point_forecast <- forecast(refit_es , h = h)$forecast
+    #print((test - point_forecast)^2)
+    MSE_mat[(i+1),] <- (test - point_forecast)^2
+    MAE_mat[(i+1),] <- abs(test - point_forecast)
+    ME_mat[(i+1),] <- test - point_forecast
+    RAE_mat[(i+1),] <- Metrics::mase(test,point_forecast)
+    
+    #point
+    test_mat[(i+1),]<-test
+    point_mat[(i+1),]<-point_forecast
+
+
+    }
+    #For GMRAE
+    ErrorDirect <- rep(NA,h)
+    ErrorKDE<- rep(NA,h)
+    SimDirect<- rep(NA,h)
+    SimSigma<- rep(NA,h)
+    SimErrorEMP<- rep(NA,h)
+    SimKDE<- rep(NA,h)
+    BootDirect<- rep(NA,h)
+    BootSigma<- rep(NA,h)
+    BootErrorEmp<- rep(NA,h)
+    BootKDE<- rep(NA,h)
+    #Intervals
+    for (i in 1:h){
+      ErrorDirect[i] <- GMIS(EMP_mat[,i],Alg_mat[,i])
+      ErrorKDE[i] <- GMIS(KDE_mat[,i],Alg_mat[,i])
+      SimDirect[i] <- GMIS(SimDirectEMP_mat[,i],Alg_mat[,i])
+      SimSigma[i] <- GMIS(SimMeanSigma_mat[,i],Alg_mat[,i])
+      SimErrorEMP[i] <- GMIS(SimMeanEMP_mat[,i],Alg_mat[,i])
+      SimKDE[i] <- GMIS(SimMeanKDE_mat[,i],Alg_mat[,i])
+      BootDirect[i] <- GMIS(BootDirectEMP_mat[,i],Alg_mat[,i])
+      BootSigma[i] <- GMIS(BootMeanSigma_mat[,i],Alg_mat[,i])
+      BootErrorEmp[i] <- GMIS(BootMeanEMP_mat[,i],Alg_mat[,i])
+      BootKDE[i] <- GMIS(BootMeanKDE_mat[,i],Alg_mat[,i])
+    }
+  IS_df['ErrorDirect'] <- ErrorDirect #colMeans(EMP_mat) the past
+  IS_df['ErrorKDE'] <- ErrorKDE
+  IS_df['SimDirect'] <- SimDirect
+  IS_df['SimSigma'] <- SimSigma
+  IS_df['SimErrorEMP'] <- SimErrorEMP
+  IS_df['SimKDE'] <- SimKDE
+  IS_df['BootDirect'] <- BootDirect
+  IS_df['BootSigma'] <- BootSigma
+  IS_df['BootErrorEMP'] <- BootErrorEmp
+  IS_df['BootKDE'] <- BootKDE
+  #IS_df['Algebric'] <- colMeans(Alg_mat)
+   #Point Forecast
+  PS_df['ETS_MSE'] <- colMeans(MSE_mat)
+  PS_df['ETS_MAE'] <- colMeans(MAE_mat) 
+  PS_df['ETS_ME'] <- colMeans(ME_mat) 
+  PS_df['ETS_RAE'] <- colMeans(RAE_mat)
+  
+  
+  return(list(EMP_mat,KDE_mat,SimDirectEMP_mat,SimMeanSigma_mat,SimMeanEMP_mat,SimMeanKDE_mat,BootDirectEMP_mat,BootMeanSigma_mat,BootMeanKDE_mat,Alg_mat,test_mat,point_mat))
+}
+```
+
+
+Intervals:
+
+A function which combines the two function above.
+
+For every different time series:
+
+* Applies the functions for ETS and XGBoost
+* Calculates GMRAE: Algebric-Theoretical method on ETS is used as benchmark
+* Combines the Interval metrics and the Point Forecast metrics
+* Returns the two final dataframes for Intervals and Point Forecasts.
+
+
+
+```{r}
+intervals <- function(df ,level, ets_model="Optimal"){
+  h <- frequency(df)
+  start_time_ets <- Sys.time()
+  ets <- ETS_intervals(df ,level, model=ets_model, h = h) #I check for the optimal model
+  ets_is <- ets[1][[1]]
+  ets_ps <- ets[2][[1]]
+  #The algebric theoretical method is used as benchmark
+  benchmark <- ets[3][[1]]
+  end_time_ets <- Sys.time()
+  print(paste("Intervals from ETS on: ",end_time_ets-start_time_ets))
+  start_time_xgb <- Sys.time()
+  xgb <- XGB_interval(df , level, h,benchmark)
+  xgb_is <- xgb[1][[1]]
+  xgb_ps <- xgb[2][[1]]
+  xgb_is <- xgb_is[,-1] #Gets rid of the second h
+  xgb_ps <- xgb_ps[,-1]
+  end_time_xgb <- Sys.time()
+  print(paste("Intervals from XGBoost on: ",end_time_xgb - start_time_xgb))
+  IS_df <- cbind(ets_is,xgb_is)
+  IS_df <- IS_df[,-1] #Gets rid of the h
+  #Divides by the theoretical method to make errors relative
+  #IS_df <- make_relative(IS_df)
+  IS_df["Means",] <-colMeans(IS_df)
+  PS_df <- cbind(ets_ps,xgb_ps)
+  PS_df <- PS_df[,-1] #Gets rid of the h
+  PS_df["Means",] <-colMeans(PS_df)
+  print(paste("Total Time:",end_time_xgb-start_time_ets))
+  return(list(IS_df,PS_df))
+   }
+```
+
+
+Applying functions on the different sets of time series:
+
+**Note** 
+
+For every set of time series, the mean values(for every method) of the results of every series on each set(for every forecast horizon) are saved for exploration.
+
+
+**Quarterly Series**
+
+
+```{r}
+final_4_is_list <-list()
+final_4_ps_list <- list()
+```
+
+
+
+
+```{r}
+parallelStartSocket(cpus = 12)
+for (i in 1:dim(tourQuarter)[2]) {
+  print(i)
+  res <- intervals(tourQuarter[,i],0.95)
+  res_is <- res[1][[1]]
+  res_ps <- res[2][[1]]
+  final_4_is_list[[(i)]] <- res_is
+  final_4_ps_list[[(i)]] <- res_ps
+  #j <- j+1
+}
+parallelStop()
+
+```
+
+Getting means
+
+```{r}
+save(final_4_is_list,final_4_ps_list,file="4-steps.RData")
+
+x<- final_4_is_list
+cols <- colnames(res_is)
+to_divide <- length(final_4_is_list)
+#26 and 75 have a problem
+total_quarter <- data.frame(Reduce('+', lapply(x, '[', cols)))/to_divide
+print(total_quarter)
+```
+
+
+**Monthly Series**
+
+
+```{r}
+final_12_is_list <-list()
+final_12_ps_list <- list()
+```
+
+
+```{r}
+parallelStartSocket(12)
+
+for (i in 1:dim(tourMonthly)[2]) {
+  print(i)
+  res <- intervals(tourMonthly[,i],0.95)
+  res_is <- res[1][[1]]
+  res_ps <- res[2][[1]]
+  final_12_is_list[[(i)]] <- res_is
+  final_12_ps_list[[(i)]] <- res_ps
+  }
+parallelStop()
+```
+
+Means:
+
+```{r}
+x <- final_12_is_list
+cols <- colnames(res_is)
+to_divide <- length(x)
+total_monthly <- data.frame(Reduce('+', lapply(x, '[', cols)))/to_divide
+print.data.frame(total_monthly)
+
+save(final_12_is_list,final_12_ps_list,file="12-steps.RData")
+```
+
+
+**Weekly Series**
+
+```{r}
+final_13_is_list <-list()
+final_13_ps_list <- list()
+```
+
+
+
+
+```{r}
+parallelStartSocket(12)
+for (i in 1:dim(manufWeek)[2]) {
+  print(i)
+  res <- intervals(manufWeek[,i],0.95)
+  res_is <- res[1][[1]]
+  res_ps <- res[2][[1]]
+  final_13_is_list[[(i)]] <- res_is
+  final_13_ps_list[[(i)]] <- res_ps
+  }
+parallelStop()
+
+```
+
+
+```{r}
+
+save(final_13_is_list,final_13_ps_list,file="13-steps.RData")
+
+```
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,809 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+## Introduction
+
+This notebook is about defying all the appropriate functions for estimating PIs with XGBoost.
+
+Functions will be used on the AirPassenger time series used for the ETS models as well.
+
+
+
+```{r}
+library(xgboost)
+library(mlr)
+library(parallel)
+library(parallelMap)
+library(tidyr)
+library(tseries)
+library(Metrics)
+library(forecast)
+library(EnvStats) #for geometric mean
+library(Metrics) # for MASE
+library(ggplot2)
+library(smooth)
+```
+
+## Essential Functions:
+
+* create_lags : Transforming the dataset into the appropriate format, where each feature is a past value (a lag). For every value $y_t$, $lag_1 = y_{t-1} , lag_2 = y_{t−2}, ..., lag_n = y_{t−n}$. Lags are the features of the model.
+
+* Forecasted1 : Producing an h step forecast. It is important to highlight that forecasting is not the same as predicting. Predicting is used to predict the next value based on past values. However when producing h-step forecasts, not all past values are known as they have not been predicted yet. As a result to predict the h-th value ahead, firstly, values h-1 , h-2 , ... h-n need to be predicted first and used for the prediction on the the h-th value.
+
+* Forecasted2 : Another variation of forecasting used to obtain in-sample errors
+
+* get_errors : A function which returns the in-sample errors of the model for a specific time step.
+
+The rest of the functions are the methods used to estimate the desired PI.
+
+```{r}
+#function to create lags
+create_lags <- function(data , lags ){
+  n <- length(data)
+  #lags + 1 for the actual true value!
+  X <- array(NA , c(n,lags + 1))
+  for (i in 1:(lags + 1)){
+    #Adding values from the training set 
+    X[i:n,i] <- data[1:(n-i+1)]
+  }
+  #Renaming for the lags:
+  colnames(X) <- c("y",paste0("lag",1:lags))
+  #df_toReturn <- as.data.frame(X)
+  return(X)
+}
+
+forecasted1 <- function(test_set , h , fit_model){
+  asd <- test_set
+  for ( i in 1:length(colnames(asd))){
+    colnames(asd)[i] <- gsub("[a-zA-Z ]", "",colnames(asd)[i] )
+  }
+  cols <- as.double(colnames(asd))
+  
+  forecasted <- array(NA , c(h,1))
+    for (i in 1:h){
+      zz <- asd[i,]
+  
+      lagged <- zz[length(zz):1]
+      n <- length(zz)
+      lagged <- c(zz,forecasted)
+      #lagged <- lagged[n:1]
+      lagged <- array(lagged, c(1,n))
+      #print(lagged)
+      #print.data.frame(test_set[1,])
+      #colnames(lagged) <- colnames(t(test_set[1,]))
+      colnames(lagged) <- colnames((test_set[1,])) #Dont know about this one or the above
+      #print(lagged)
+          
+      #Converting to array similar to x_train for xgboost
+      to_predict <- as.data.frame(lagged )
+      #print.data.frame(to_predict[1,])
+      prediction <- predict(fit_model, newdata = to_predict)
+      forecasted[i] <- prediction$data[[1]]
+      #(length - i) is a formula taken above -> to make changes on the lags due to forecasts
+      if (i < length(cols)){
+        for (j in (1:(length(cols)-i))){
+          #i is for the above(to get the exact formula check box above)
+            asd[i + cols[j],j] <- prediction$data[[1]]
+            #print((length(cols)-i))
+            #print(asd[i + cols[j],j])
+    #print(i)
+        }
+  }
+    }
+  return(forecasted)
+}
+
+
+
+get_errors <- function(stat_df ,season_df ,fc_12 , a , b ){
+
+  df_pred <- stat_df #df_stat
+  df_pred[a:b] <- fc_12
+  rev1_pred <- diffinv(df_pred , lag = 1 ,xi = season_df[1]) #df_seasdif[1]
+  rev2_pred <- diffinv(rev1_pred , lag = 12 , xi = AirPassengers[1:12])
+  
+  df_true <- stat_df
+  rev1_true <- diffinv(df_true , lag = 1 ,xi = season_df[1])
+  rev2_true <- diffinv(rev1_true , lag = 12 , xi = AirPassengers[1:12])
+  
+  rev2_true <- rev2_true[-(1:13)] #removing first cols to match with train_adj
+  rev2_pred <-rev2_pred[-(1:13)]
+  
+  rev2_true_year <- rev2_true[a:b]
+  rev2_pred_year <- rev2_pred[a:b]
+  
+  errors <- rev2_true_year - rev2_pred_year
+  return(errors) }
+
+forecasted2 <- function(test_set , h , fit_model){
+  asd <- test_set
+  for ( i in 1:length(colnames(asd))){
+    colnames(asd)[i] <- gsub("[a-zA-Z ]", "",colnames(asd)[i] )
+  }
+  cols <- as.double(colnames(asd))
+  
+  forecasted <- array(NA , c(h,1))
+    for (i in 1:h){
+      zz <- asd[i,]
+  
+      lagged <- zz[length(zz):1]
+      n <- length(zz)
+      lagged <- c(zz,forecasted)
+      #lagged <- lagged[n:1]
+      lagged <- array(lagged, c(1,n))
+      #print(lagged)
+      #print.data.frame(test_set[1,])
+      colnames(lagged) <- colnames(t(test_set[1,]))
+      #colnames(lagged) <- colnames((test_set[1,])) #Dont know about this one or the above
+      #print(lagged)
+          
+      #Converting to array similar to x_train for xgboost
+      to_predict <- as.data.frame(lagged )
+      #print.data.frame(to_predict[1,])
+      prediction <- predict(fit_model, newdata = to_predict)
+      forecasted[i] <- prediction$data[[1]]
+      #(length - i) is a formula taken above -> to make changes on the lags due to forecasts
+      if (i < length(cols)){
+        for (j in (1:(length(cols)-i))){
+          #i is for the above(to get the exact formula check box above)
+            asd[i + cols[j],j] <- prediction$data[[1]]
+            #print((length(cols)-i))
+            #print(asd[i + cols[j],j])
+    #print(i)
+        }
+  }
+    }
+  return(forecasted)
+  }
+
+
+```
+
+```{r}
+#Methods
+full_direct_quant <- function(data , level){
+  upper <- seq(0,12)
+  lower <- seq(0,12)
+  prob <- c(1-level , level)
+  for (i in 1:12){
+    quant <- quantile(data[i,] , prob)
+    lower[i] <- as.double(quant[1])
+    upper[i] <- as.double(quant[2])
+  }
+  return(list(lower[1:12],upper[1:12]))
+}
+#Second method -> mean and sigma
+full_mean_sigma <- function(data , level) {
+  upper <- seq(0,12)
+  lower <- seq(0,12)
+  z <- qnorm(c((1-0.95)/2,(1+0.95)/2))
+  for (i in 1:12){
+    mu_forecast <- mean(data[i,])
+    #errors <- data - mu_forecast
+    sigma <- sqrt(mse(mu_forecast,data[i,]))
+    quant <- mu_forecast + sigma * z
+    lower[i] <- as.double(quant[1])
+    upper[i] <- as.double(quant[2])
+  }
+  return(list(lower[1:12],upper[1:12])) }
+#mean_sigma(simmulationsAAA[12,],0.95)  
+
+#Third method -> mean empirical
+full_mean_empirical <- function(data , level ){
+  
+  lower <- seq(0,12)
+  upper <- seq(0,12)
+  probs <- c(1-level,level)
+  for (i in 1:12){
+    mu_forecast = mean(data[i,])
+    errors <- data[i,] - mu_forecast
+    error_quant <- quantile(errors, prob =probs )
+    quant <- mu_forecast + error_quant
+    lower[i] <- quant[1]
+    upper[i] <- quant[2]
+  }
+  return(list(lower[1:12],upper[1:12])) }
+
+#Forth method -> KDE
+full_mean_kde <- function(data , level ){
+  #using Silvermans bandwidth and epanechnikov kernel
+  upper <- seq(0,12)
+  lower <- seq(0,12)
+  q <- (1-level)/2 + c(0,1)*level
+  for (i in 1:12){
+    mu_forecast <- mean(data[i,])
+    errors <- data[i,] - mu_forecast
+    kde <- density(errors , bw = 'nrd0' , kernel ="epanechnikov")
+    kcde <- cumsum(kde$y)/max(cumsum(kde$y))
+    q <- (1-level)/2 + c(0,1)*level
+    quant <-rep(0,2)
+    
+    for (j in 1:2){
+        idx <- order(abs(kcde-q[j]))[1:2]
+        quant[j] <- approx(kcde[idx],kde$x[idx],xout=q[j])$y
+    
+  }
+    lower[i] <- mu_forecast + quant[1]
+    upper[i] <- mu_forecast + quant[2]
+}
+  return(list(lower[1:12],upper[1:12])) }
+
+
+
+```
+
+```{r}
+#the ID function for IS bellow
+Id <- function(a , b){
+  if (a > b) 1
+  else 0
+}
+#Interval Score for a single Interval
+IS <- function (true, upper , lower , a){ #Interval Score
+  (upper - lower ) + 2/a *(lower - true)*Id(lower,true) + 2/a*(true - upper)*Id(true,upper)
+}
+#Mean Interval Score
+ISs <- function(true,upper,lower,a){ 
+  ISs <- rep(0,length(true))
+  for (i in 1:length(ISs)){
+    
+    ISs[i] <- IS(true[i],upper[i],lower[i],a)
+  }
+  ISs #returns Interval Scores
+}
+```
+
+```{r}
+#Creating the functions that will produce the intervals!
+direct_quant <- function(model , a ){
+  a <- (1-0.95)/2 + c(0,1)*0.95
+  #Getting the errors:
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  #initializing
+  low <- rep(0,12)
+  up <- rep(0,12)
+  lower <- rep(0,12)
+  upper <- rep(0,12)
+  #Calculating for each h
+  for (h in 1:12){
+    low[h] <- as.double( quantile( er[,h],a))[1] 
+    up[h] <- as.double( quantile( er[,h],a))[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:12],upper[1:12]))
+}
+
+
+kde_quant <- function(model , a ){
+  a <- (1-a)/2 + c(0,1)*a 
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  low <- rep(0,12)
+  up <- rep(0,12)
+  for (h in 1:12){
+    density <- density.default(er[,h],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity)
+    
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y 
+    }
+      if (is.na(x[i])){
+        idx <- order(abs(kcde-a[i]))[2:3] 
+        x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y         
+      }
+    low[h] <- x[1]
+    up[h] <- x[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:12],upper[1:12]))  
+  }
+#Reference: trnnick , (2017),TStools -> intervals-empirir , GitHub repository https://github.com/trnnick/TStools/blob/master/R/intervals-empir.
+#help(sd)
+
+
+mu_sigma <- function(model , level){
+  a <- qnorm(c((1-level)/2,(1+level)/2))
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  low <- rep(0,12)
+  up <- rep(0,12)
+  lower <- rep(0,12)
+  upper<-rep(0,12)
+  sigma <- rep(0,12)
+  for (h in 1:12){
+    sigma[h] <- sd(er[,h])
+    low <- sigma[h]*a[1]
+    up <- sigma[h]*a[2]
+    
+  }
+  mu_forecast <- forecast(model , 12)
+  lower <- mu_forecast$mean + low
+  upper <- mu_forecast$mean + up
+  return(list(lower[1:12],upper[1:12]))
+
+  
+}
+
+#For multiplicative models.
+mu_direct_quant <- function(model , a ){
+  a <- (1-0.95)/2 + c(0,1)*0.95
+  #Getting the errors:
+  errors <- model$errors
+  er <- errors[-(1:12),]
+  #initializing
+  low <- rep(0,12)
+  up <- rep(0,12)
+  lower <- rep(0,12)
+  upper <- rep(0,12)
+  #Calculating for each h
+  for (h in 1:12){
+    low[h] <- as.double( quantile( er[,h],a))[1] 
+    up[h] <- as.double( quantile( er[,h],a))[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low * mu_forecast$mean
+  upper <- mu_forecast$mean + up * mu_forecast$mean
+  return(list(lower[1:12],upper[1:12]))
+}
+
+mu_kde_quant <- function(model , a ){
+  a <- (1-a)/2 + c(0,1)*a 
+  errors <- model$errors
+  er <- errors[-(1:12),] 
+  low <- rep(0,12)
+  up <- rep(0,12)
+  for (h in 1:12){
+    density <- density.default(er[,h],bw='nrd0',kernel = "epanechnikov")
+    cdensity <- cumsum(density$y)
+    kcde <- cdensity/max(cdensity)
+    
+    x <- rep(0,2)
+    for (i in 1:2){
+      idx <- order(abs(kcde-a[i]))[1:2] 
+      x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y 
+      if (is.na(x[i])){
+        idx <- order(abs(kcde-a[i]))[2:3] 
+        x[i] <- approx(kcde[idx],density$x[idx],xout=a[i])$y         
+      }
+    }
+    low[h] <- x[1]
+    up[h] <- x[2]
+  }
+  mu_forecast <- forecast(model , 12)
+  
+  lower <- mu_forecast$mean + low * mu_forecast$mean
+  upper <- mu_forecast$mean + up * mu_forecast$mean
+  return(list(lower[1:12],upper[1:12]))  
+  }
+
+
+
+```
+
+
+## Preparing the series.
+
+1.  Initialy, series are converted to stationary by taking the appropriate differences and seasonal differences. This is essential as the algorithm fails to fit on non-stationary series as the results were pretty dissapointing
+
+2. By Creating 12 lags with the create_lags functions, for every value $y_t$ all their past 12 observations are used as features. 
+
+3. By using PACF defined on the Readme available, the most representitve features(lags) in terms of their relationship with the actual value $y_t$, are selected and are kept for the final form of the dataset.
+
+4. Finaly, an initial split of the series into training - test set is also necessary.
+
+```{r}
+df <- AirPassengers
+x_test <- window(df , start = 1960)
+seasonal_dif_number <- nsdiffs(df)
+frequency = frequency(df)
+df_seasdif <- diff(df , lag = frequency , differences = seasonal_dif_number )
+dif_num <- ndiffs(df_seasdif)
+df_stat <- diff(df_seasdif, differences= dif_num)
+
+df <- df_stat
+df_all <-  create_lags(df , 12)
+df_all <- as.data.frame(df_all)
+df_all <- df_all[,c("y","lag1", "lag2", "lag3",  "lag9" , "lag10" , "lag12")]
+df_all <- as.matrix(df_all)
+
+#Splitting initialy.
+x_train <- df_all[1:107,]
+y_train <- df_all[1:107,'y']
+x_test <-df_all[108:131,-1]
+y_test <- df_all[108:131,'y']
+
+```
+
+## Automatic Optimazition of XGBoost
+
+Instead of manually tuning all the hyperparamaters of the XGBoost(A procedure which is feasible for a single time series, but for over 300 it would be extremely time consuming), an automatic Random Search on the generated hyperparameter’s grid was defined and the combination of hyperparamaters which produced the best score in terms of MSE were selected.
+
+
+**It is important to highlight that not all hyperparamaters of XGBoost were automaticaly fine-tuned as this would require multiple iterations and CrossValidations**
+
+
+```{r}
+#detach("package:Metrics", unload=TRUE)
+
+x_train_mlr_cv <- as.data.frame(x_train)
+  #Creating task
+ml_task_cv <- makeRegrTask(data = x_train_mlr_cv , target = "y")
+  learner_cv <- makeLearner("regr.xgboost", config = list(show.learner.output = FALSE))
+  learner_cv$par.vals <- list( objective = "reg:squarederror", nrounds = 35L)
+  cv_folds_cv <- makeResampleDesc("CV" ,iters = 50L)
+  ctrl_cv <- makeTuneControlRandom(maxit = 15L) 
+  model_Params_cv <- makeParamSet(
+    makeDiscreteParam("booster",values = c("gbtree","gblinear")),
+    makeIntegerParam("max_depth",lower = 1L , upper = 6L),
+    makeNumericParam("lambda",lower = 0.5 , upper = 0.75), #regularizeation
+    makeNumericParam("eta", lower = 0.1, upper = 0.2),
+    makeNumericParam("subsample", lower = 0.5, upper = 0.85),
+    makeNumericParam("min_child_weight",lower = 4L , upper = 10L),
+    makeNumericParam("colsample_bytree",lower = 0.5 , upper = 1)
+  )
+
+  tuned_model_cv <- tuneParams(learner = learner_cv,
+                        task = ml_task_cv,
+                        resampling = cv_folds_cv,
+                        measures = mse,       #2 functions
+                        par.set = model_Params_cv,
+                        control = ctrl_cv, 
+                        show.info = FALSE)
+  #Creating a new model
+new_model_cv <- setHyperPars(learner = learner_cv , par.vals = tuned_model_cv$x)
+fit_cv <- train(learner = new_model_cv,task = ml_task_cv)
+```
+
+## Empirical methods for the PI estimation.
+
+All the above functions were tested.
+
+Rolling Origins with re-estimation was used, so the results would be comparable with the results produced by the ETS model.
+
+**For the estimation of point-forecast, a procedure similar with the procedure used on state-space-models was implemented**
+
+A sample of 100 simulations(for every forecast horizon h) was estimated and the point forecast was the mean value of each distribution produced.
+
+
+
+```{r}
+library(Metrics)
+to_return <- data.frame(h = c(1:12))
+
+#Setting the initials
+x_train <- df_all[1:107,]
+y_train <- df_all[1:107,'y']
+x_test <-df_all[108:131,-1]
+y_test <- df_all[108:131,'y']
+
+n <- dim(x_test)[1] - 12 + 1
+lower <- rep(NA , 12)
+upper <- rep(NA , 12)
+#A matrix for each on of the methods
+EMP_mat <- matrix(NA , nrow = n , ncol = 12) #12 stands for h 
+KDE_mat <- matrix(NA , nrow = n , ncol = 12) #12 stands for h
+SIGMA_mat <- matrix(NA , nrow = n , ncol = 12) #12 stands for h
+MSE_mat <- matrix(NA , nrow = n , ncol = 12)
+#MSE_means <- rep(NA , n)
+#sd_mat <- matrix(NA , nrow = n , ncol = 12)
+#Fitting once
+fit_cv <- train(learner = new_model_cv,task = ml_task_cv)
+for(i in 1:13){ #13 stands for n 
+  flag <- TRUE
+  while(flag == TRUE){
+    flag <- FALSE
+  
+  
+    #Updating training set
+    i_train_top <- dim(x_train)[1] + (i-1)
+    x_train_cv <- df_all[1:i_train_top,]
+    
+    
+    #Updating test set
+    i_test_bot <- (dim(x_train)[1] + 1) + (i-1)
+    i_test_top <- (dim(x_train)[1] + 12) + (i-1)
+    x_test_cv <- df_all[i_test_bot:i_test_top,-1] 
+    y_test_cv <- df_all[i_test_bot:i_test_top,'y']
+    
+    #Refitting the model
+    x_train_cv <- as.data.frame(x_train_cv)
+    ml_task_cv <- makeRegrTask(data = x_train_cv,target = "y")
+    learner_cv <- makeLearner("regr.xgboost", config = list(show.learner.output = FALSE))
+    learner_cv$par.vals <- list( objective="reg:squarederror", nrounds=35L)
+    new_model_cv <- setHyperPars(learner = learner_cv , par.vals = tuned_model_cv$x)
+    fit_cv <- train(learner = new_model_cv , task = ml_task_cv)
+    
+    #Errors
+    #Initializing errors set-up for every itteration:
+    train_adj <- x_train_cv[13:dim(x_train_cv)[1],] #Removing row with NAs on cols
+    train_adj <- train_adj[1:(dim(train_adj)[1]-10),] #10 stands for h-2
+    final_cv <- matrix(0 , 1 , 12) 
+    errors_cv <- matrix(NA , 12 ,(dim(train_adj)[1]-11)  )
+    for (k in 1:(dim(train_adj)[1]-11)){   
+      
+      a <- 1 + (k-1) 
+      b <- 12 + (k-1) #12 stands for h
+      #print(paste(a,"-",b))
+      partial_train <- train_adj[a:b,] #getting the part to initialize the 12-steps forecast
+      partial_train <- partial_train[,-1] #removing "y" collumn
+      
+      fc_cv <- forecasted1(partial_train , 12 ,fit_cv ) #forecasting 12 step on training set.
+      errors_cv[,k] <- get_errors(df_stat[1:i_test_top] ,df_seasdif , fc_cv , a , b ) #getting the errors
+    }
+    #Getting mean-forecast
+    
+    simmulations_cv <- (matrix(0, 12 ,100))
+  
+    for (z in 1:100){
+    
+      fit_cv_sim <- train(learner = new_model_cv,task = ml_task_cv)
+      fc_cv <- forecasted2(x_test_cv, 12 , fit_cv_sim )
+        #Inversing predicted
+      df_pred <- df[1:i_test_top]
+      df_pred[i_test_bot:i_test_top] <- fc_cv
+      rev1_pred <- diffinv(df_pred , lag = 1 ,xi = df_seasdif[1])
+      rev2_pred <- diffinv(rev1_pred , lag = 12 , xi = AirPassengers[1:12])
+       
+      y_pred <- tail(rev2_pred, 12)
+      
+      simmulations_cv[,z] <- y_pred
+      
+    }
+    mean_forecast_cv <- colMeans(t(simmulations_cv))
+    
+    #print(paste(i,"fc:",mean_forecast_cv))
+  #Preparing to take the intervals:
+    direct <- list(rep(NA,12),rep(NA,12))
+    m_sigma <-list(rep(NA,12),rep(NA,12))
+    m_kde <-list(rep(NA,12),rep(NA,12))
+    
+    for (j in 1:2){
+      direct[[j]] <- full_direct_quant(errors_cv , 0.95)[[j]] + mean_forecast_cv
+      m_sigma[[j]] <- full_mean_sigma(errors_cv , 0.95)[[j]] + mean_forecast_cv
+      m_kde[[j]] <- full_mean_kde(errors_cv , 0.95)[[j]] + mean_forecast_cv
+    }
+    to_check <-full_mean_kde(errors_cv , 0.95)
+    for (l in 1:2){
+      if (sum(is.na(to_check[[l]]))!=0 ){
+        flag <- TRUE
+   
+      } 
+      #else{
+       # print(paste(i,k))
+      #}
+      }
+  }
+    df_true_cv <- df_stat[1:i_test_top]
+    rev1_true_cv <- diffinv(df_true_cv , lag = 1 ,xi = df_seasdif[1])
+    rev2_true_cv <- diffinv(rev1_true_cv , lag = 12 , xi = AirPassengers[1:12])
+    y_true_cv <- tail(rev2_true_cv,12)
+  
+    #test_set <- y_true_cv
+    #sq_error <- (y_true_cv - mean_forecast_cv)^2
+    #MSE_mat[i,] <- sq_error
+    
+    #MSE_means[i] <- mse(test_set,mean_forecast_cv)
+    #sd_mat[i,] <- apply(t(errors_cv), 2, sd)
+    
+    EMP_mat[i,] <- ISs(test_set,direct[[2]],direct[[1]],0.05)
+    #print(EMP_mat[i,])
+    SIGMA_mat[i,]<- ISs(test_set,m_sigma[[2]],m_sigma[[1]],0.05)
+    KDE_mat[i,]<- ISs(test_set,m_kde[[2]],m_kde[[1]],0.05)
+    print(paste(i,"check"))
+  
+  }
+  to_return['Direct Empirical'] <- colMeans(EMP_mat)
+  to_return['KDE Empirical'] <- colMeans(KDE_mat) 
+  to_return['Sigma Empirical'] <- colMeans(SIGMA_mat) 
+  #Xg_empi_means <- colMeans(to_return)
+  #to_return['MSE'] <- mean(colMeans(MSE_mat))
+
+  
+#print(to_return)
+#print(MSE_means)
+#Xg_empi_means <- Xg_empi_means[2:4]
+
+```
+
+
+## Results Comparisson
+
+A simple comparssion between the results produced from the various methods applied on the ETS model with the methods on XGBoost
+
+
+```{r, fig.height=5, fig.width=8}
+#Getting the method that produced the best MIS on the simmulation method!
+
+plot(c(1:12) , validated$`Algebric`, type='l', col='red' , ylim=c(50,200) ,pch = 1,
+      xlab="Horizon h" , ylab = "Interval Scores",lwd=2)
+lines(c(1:12) , validated$`Sim KDE` , col = 'blue ',lwd=2 ,type='o' ,pch=2)
+lines(c(1:12), validated$`Boot KDE`, col = 'yellow',lwd=2 ,type='o',pch=3)
+lines(c(1:12), validated$`Error Empirical`, col = 'purple',lwd=2 ,type='o',pch=4)
+lines(c(1:12), validated$`Error KDE`, col = 'green',lwd=2 ,type='o',pch=5)
+lines(c(1:12), to_return$`KDE Empirical`, col = 'black',lwd=2 ,type='o',pch=6)
+lines(c(1:12), to_return$`Sigma Empirical`, col = 'brown',lwd=2 ,type='o',pch=7)
+
+
+legend("topleft", legend = c("MAM-Algebric" ,"MAM-Sim-KDE","MAM-Boot-KDE" , "MAM-Error-Emp", "MAM-Error-KDE",
+                            "XGB-KDE" , "XGB-Sigma")
+         ,col=c("red", "blue" , "yellow" , "purple" , "green" , "black" , "brown"),
+       lty=1, cex=0.8 , pch=c(1,2,3,4,5,6,7)) 
+
+```
+
+
+
+## Simulation Based methods on XGBoost
+
+A demonstration of how Simulation methods could be applied on XGBoost.
+
+However as shown and explained on the readme file, this family of method is not performing particular well when applied on a machine learning model.
+
+
+```{r}
+df <- AirPassengers
+x_test <- window(df , start = 1960)
+seasonal_dif_number <- nsdiffs(df)
+frequency = frequency(df)
+df_seasdif <- diff(df , lag = frequency , differences = seasonal_dif_number )
+dif_num <- ndiffs(df_seasdif)
+df_stat <- diff(df_seasdif, differences= dif_num)
+
+df <- df_stat
+df_all <-  create_lags(df , 12)
+df_all <- as.data.frame(df_all)
+df_all <- df_all[,c("y","lag1", "lag2", "lag3",  "lag9" , "lag10" , "lag12")]
+df_all <- as.matrix(df_all)
+
+#Splitting initialy.
+x_train <- df_all[1:119,]
+y_train <- df_all[1:119,'y']
+x_test <-df_all[120:131,-1]
+y_test <- df_all[120:131,'y']
+
+
+detach("package:Metrics", unload=TRUE)
+
+x_train_mlr_cv <- as.data.frame(x_train)
+  #Creating task
+ml_task_cv <- makeRegrTask(data = x_train_mlr_cv , target = "y")
+  learner_cv <- makeLearner("regr.xgboost", config = list(show.learner.output = FALSE))
+  learner_cv$par.vals <- list( objective="reg:squarederror", nrounds=35L)
+  cv_folds_cv <- makeResampleDesc("CV",iters=50L)
+  ctrl_cv <- makeTuneControlRandom(maxit = 10L) 
+  model_Params_cv <- makeParamSet(
+    makeDiscreteParam("booster",values = c("gbtree","gblinear")),
+    makeIntegerParam("max_depth",lower=1L,upper=6L),
+    makeNumericParam("lambda",lower=0.5,upper=0.75), #regularizeation
+    makeNumericParam("eta", lower = 0.1, upper = 0.2),
+    makeNumericParam("subsample", lower = 0.5, upper = 0.85),
+    makeNumericParam("min_child_weight",lower=4L,upper=10L),
+    makeNumericParam("colsample_bytree",lower = 0.5,upper = 1)
+  )
+
+  tuned_model_cv <- tuneParams(learner = learner_cv,
+                        task = ml_task_cv,
+                        resampling = cv_folds_cv,
+                        measures = mse,       #2 functions
+                        par.set = model_Params_cv,
+                        control = ctrl_cv, 
+                        show.info = FALSE)
+  #Creating a new model
+new_model_cv <- setHyperPars(learner = learner_cv , par.vals = tuned_model_cv$x)
+fit_cv <- train(learner = new_model_cv,task = ml_task_cv)
+
+simmulations1 <- (matrix(0, 12 ,1000))
+parallelStartSocket(cpus = detectCores())
+pb = txtProgressBar(min = 0, max = 1000, initial = 0) 
+
+for (i in 1:1000){
+
+  fit <- train(learner = new_model_cv,task = ml_task_cv)
+  fc <- forecasted2(x_test, 12 , fit )
+    #Inversing predicted
+  df_pred <- df
+  df_pred[120:131] <- fc
+  rev1_pred <- diffinv(df_pred , lag = 1 ,xi = df_seasdif[1])
+  rev2_pred <- diffinv(rev1_pred , lag = 12 , xi = AirPassengers[1:12])
+   
+  y_pred <- tail(rev2_pred, 12)
+  
+  simmulations1[,i] <- y_pred
+  setTxtProgressBar(pb,i)
+}
+parallelStop()
+
+
+```
+
+
+Producing the Intervals
+
+
+```{r}
+library(Metrics) # for MASE
+
+method1 <- full_direct_quant((simmulations1) , 0.95)
+method2 <- full_mean_sigma((simmulations1) , 0.95)
+method3 <- full_mean_empirical((simmulations1) , 0.95)
+method4 <- full_mean_kde((simmulations1) , 0.95)
+
+rev1_pred <- diffinv(df_stat , lag = 1 ,xi = df_seasdif[1])
+rev2_pred <- diffinv(rev1_pred , lag = 12 , xi = AirPassengers[1:12])
+y_true <- tail(rev2_pred, 12)
+
+
+
+test_set <- y_true
+
+
+res1 <- data.frame(h = c(1:12))
+res1['Direct Quant'] <- ISs(test_set,method1[[2]],method1[[1]],0.05)
+res1['Mean Sigma']<- ISs(test_set,method2[[2]],method2[[1]],0.05)
+res1['Mean Empirical']<- ISs(test_set,method3[[2]],method3[[1]],0.05)
+res1['Mean Kde']<- ISs(test_set,method4[[2]],method4[[1]],0.05)
+
+xgb_sim <- colMeans(res1)
+
+```
+
+Finaly, all the results of all the methods on both models along with MSE of point forecasts is given bellow:
+
+
+```{r}
+results <- data.frame(1,2)
+results <- results[-1,]
+colnames(results)<-c('MAM','XGboost')
+results['Algebric',] <- c(mean(alg_res$MAM_cv),NA)
+
+mam_sim <- colMeans(MAMsim_res)
+mam_sim <- mam_sim[2:5]
+results['Sim-Direct',] <- c(mam_sim[1],xgb_sim[1])
+results['Sim-MeanSigma',] <- c(mam_sim[2],xgb_sim[2])
+results['Sim-MeanDirect',] <- c(mam_sim[3],xgb_sim[3])
+results['Sim-MeanKDE',] <- c(mam_sim[4],xgb_sim[4])
+
+mam_boot <- colMeans(MAMboot_res)
+mam_boot <- mam_boot[2:5]
+results['BOOT-Direct',] <- c(mam_boot[1],NA)
+results['BOOT-MeanSigma',] <- c(mam_boot[2],NA)
+results['BOOT-MeanDirect',] <- c(mam_boot[3],NA)
+results['BOOT-MeanKDE',] <- c(mam_boot[4],NA)
+
+mam_emp <- colMeans(MAMemp_res)
+mam_emp <- mam_emp[2:3]
+Xg_empi_means <- colMeans(to_return)
+Xg_empi_means <- Xg_empi_means[2:3]
+results['Error-Direct',] <- c(mam_emp[1],Xg_empi_means[1])
+results['Error-KDE',] <- c(mam_emp[2],Xg_empi_means[2])
+
+
+results['MSE-per-h',] <- c(mean(colMeans(MAM_means)),mean(colMeans(MSE_mat)) )
+
+
+print(results)
+
+
+
+
+```
