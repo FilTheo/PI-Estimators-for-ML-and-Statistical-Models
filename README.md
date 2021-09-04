@@ -1,6 +1,6 @@
 # Estimators of Prediction Intervals for Statistical and Machine Learning Forecasts
 
-**Presented in Informs Annual Meeting 2020: **
+**Presented in Informs Annual Meeting 2020:**
 
 https://www.abstractsonline.com/notify/notifyintro.asp?MKey={87C214B4-B728-4685-BC07-53814C78751F}&NKey={C8871E23-254B-4797-AE8F-99618FF2B98A}&userFrom=
 
