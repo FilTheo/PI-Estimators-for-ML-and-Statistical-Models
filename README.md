@@ -2,7 +2,11 @@
 
 **Presented in Informs Annual Meeting 2020:**
 
+
+Confirmation:
 https://www.abstractsonline.com/notify/notifyintro.asp?MKey={87C214B4-B728-4685-BC07-53814C78751F}&NKey={C8871E23-254B-4797-AE8F-99618FF2B98A}&userFrom=
+
+The full project is written in R
 
 Sometimes (well, maybe most of the times) point forecasts are not enough.
 There is no magic sphere to predict the future. 
@@ -21,3 +25,4 @@ Gives the advantages, the limitations, and suggestions for their implementations
 
 Most importantly, it demonstrates how some of these techniques can be applied for predictions of machine learning models.
 The results of an experiment show that some methods can successfully be transferred in the machine learning domain.
+
